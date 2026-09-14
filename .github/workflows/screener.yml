@@ -1,0 +1,30 @@
+name: KOSPI/KOSDAQ Closing Screener
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5' # 한국시간 평일 15:00
+  workflow_dispatch: # 수동 실행 버튼 활성화
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pykrx requests
+
+      - name: Run Screener
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main.py
+
