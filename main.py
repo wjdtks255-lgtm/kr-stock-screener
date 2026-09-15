@@ -94,3 +94,10 @@ def run_screener():
 
 if __name__ == "__main__":
     run_screener()
+import requests
+
+TOKEN = "8773772118:AAHGx66pX2QuFT1S04uWRSSSyX5XveSmxAA"
+url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+res = requests.get(url).json()
+print("텔레그램 응답:", res)
+
