@@ -2,7 +2,7 @@ name: KOSPI/KOSDAQ Closing Screener
 
 on:
   schedule:
-    - cron: '0 6 * * 1-5' # 한국시간 평일 15:00
+    - cron: '40 5 * * 1-5' # UTC 05:40 = 한국시간(KST) 평일 14:40 실행
   workflow_dispatch:
 
 jobs:
