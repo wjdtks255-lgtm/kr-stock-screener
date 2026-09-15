@@ -92,7 +92,7 @@ def run_screener():
             send_telegram(signal)
 
 if __name__ == "__main__":
-    # 비공개 채널 ID 확인용 코드 (실행 시 로그에 텔레그램 대화 기록이 출력됩니다)
+    # 비공개 채널 ID 확인용 로그 출력
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
         res = requests.get(url).json()
