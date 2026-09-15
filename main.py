@@ -78,7 +78,6 @@ def run_screener():
 
     signals = []
     
-    # 10개 쓰레드로 동시 처리 (속도 가속)
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(analyze_stock, row, start_date) for _, row in top_300.iterrows()]
         for future in as_completed(futures):
@@ -93,11 +92,13 @@ def run_screener():
             send_telegram(signal)
 
 if __name__ == "__main__":
+    # 비공개 채널 ID 확인용 코드 (실행 시 로그에 텔레그램 대화 기록이 출력됩니다)
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        res = requests.get(url).json()
+        print("=== 텔레그램 채널/유저 ID 확인 로그 ===")
+        print(res)
+    except Exception as e:
+        print("ID 확인 로그 출력 실패:", e)
+
     run_screener()
-import requests
-
-TOKEN = "8773772118:AAHGx66pX2QuFT1S04uWRSSSyX5XveSmxAA"
-url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-res = requests.get(url).json()
-print("텔레그램 응답:", res)
-
