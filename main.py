@@ -1,97 +1,156 @@
-import datetime
 import os
 import requests
-import FinanceDataReader as fdr
+import numpy as np
+import json
+import time
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+CACHE_FILE = "tracked_coins.json"
 
-def send_telegram(message):
+def send_telegram(text):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ 텔레그램 토큰 또는 챗 아이디가 설정되지 않았습니다!")
+        return
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
-    requests.post(url, data=payload)
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    res = requests.post(url, json=payload)
+    print(f"텔레그램 전송 응답: {res.text}")
 
-def run_screener():
-    print("국장 데이터 스크리닝 시작...")
-    # 네이버 금융 기반 전체 종목 시세 조회 (깃허브 IP 차단 안 됨)
-    df_krx = fdr.StockListing('KRX')
-    
-    # 거래대금(Amount) 상위 300개 종목 추출
-    top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
-    
-    signals = []
-    today = datetime.datetime.now()
-    start_date = (today - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
-
-    for idx, row in top_300.iterrows():
-        ticker = row['Code']
-        name = row['Name']
-        
+def load_cache():
+    if os.path.exists(CACHE_FILE):
         try:
-            df = fdr.DataReader(ticker, start_date)
-            if len(df) < 20:
-                continue
-            
-            latest = df.iloc[-1]
-            prev = df.iloc[-2]
-            df_20 = df.iloc[-20:]
-            
-            close = latest['Close']
-            open_p = latest['Open']
-            high = latest['High']
-            low = latest['Low']
-            volume = latest['Volume']
-            avg_vol_20 = df_20['Volume'].mean()
-            
-            # 조건 1: 양봉 & 위꼬리 30% 이하
-            candle_body = close - open_p
-            upper_tail = high - close
-            if candle_body <= 0 or (upper_tail > candle_body * 0.3):
-                continue
-                
-            # 조건 2: 거래량 급증 (전일 대비 200% 이상, 20일 평균 대비 150% 이상)
-            if volume < prev['Volume'] * 2.0 or volume < avg_vol_20 * 1.5:
-                continue
-                
-            # 조건 3: 5일선 / 20일선 위 위치
-            ma5 = df['Close'].rolling(5).mean().iloc[-1]
-            ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            if close < ma5 or close < ma20:
-                continue
-                
-            # 지지·저항 기반 손절가 / 목표가 산출
-            stop_loss = max(low, ma5 * 0.99)
-            loss_rate = round(((stop_loss - close) / close) * 100, 2)
-            
-            high_20 = df_20['High'].max()
-            target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
-            target_1_rate = round(((target_1 - close) / close) * 100, 2)
-            
-            target_2 = target_1 * 1.05
-            target_2_rate = round(((target_2 - close) / close) * 100, 2)
-            
-            chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
-            reason = "20일 이평선 돌파 및 5일선 지지확인 / 전일 대비 거래량 200% 이상 유입 / 위꼬리 짧은 강한 장대양봉"
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
 
-            msg = f"<b>{name}({ticker})</b>\n" \
-                  f"현재가: {int(close):,}원\n" \
-                  f"1차목표가: {int(target_1):,}원 ({target_1_rate:+}%)\n" \
-                  f"2차목표가: {int(target_2):,}원 ({target_2_rate:+}%)\n" \
-                  f"손절가: {int(stop_loss):,}원 ({loss_rate:+}%)\n" \
-                  f"간단한상승근거: {reason}\n" \
-                  f"주식차트링크: {chart_link}"
-                  
-            signals.append(msg)
-        except Exception:
-            continue
+def save_cache(cache):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f)
+    except Exception as e:
+        print(f"캐시 저장 에러: {e}")
 
-    print(f"검색 완료. 포착된 종목 수: {len(signals)}")
-    
-    if not signals:
-        send_telegram("현재 조건에 부합하는 종가매매 종목이 없습니다.")
-    else:
-        for signal in signals[:5]:
-            send_telegram(signal)
+def get_upbit_market_details():
+    url = "https://api.upbit.com/v1/market/all"
+    res = requests.get(url).json()
+    market_dict = {}
+    for item in res:
+        if item['market'].startswith('KRW-') and item['market'] != 'KRW-BTC':
+            market_dict[item['market']] = item['korean_name']
+    return market_dict
 
 if __name__ == "__main__":
-    run_screener()
+    print("⚡ [15분봉 초단기 폭발 & 바닥 돌파] 스캐너 가동 중...")
+    
+    market_dict = get_upbit_market_details()
+    tracked_cache = load_cache()
+    current_time = time.time()
+    
+    # 12시간 지난 캐시는 자동 정리 (15분봉이므로 회전율 빠르게)
+    tracked_cache = {k: v for k, v in tracked_cache.items() if current_time - v.get('time', 0) < 43200}
+    
+    notifications = []
+
+    for market, korean_name in market_dict.items():
+        try:
+            # 15분봉 데이터 30개 가져오기
+            url = f"https://api.upbit.com/v1/candles/minutes/15?market={market}&count=30"
+            res = requests.get(url).json()
+            if len(res) < 25:
+                continue
+                
+            res = list(reversed(res))
+            closes = np.array([x['trade_price'] for x in res])
+            highs = np.array([x['high_price'] for x in res])
+            lows = np.array([x['low_price'] for x in res])
+            volumes = np.array([x['candle_acc_trade_volume'] for x in res])
+            
+            current_price = closes[-1]
+            prev_close = closes[-2]
+            change_rate = ((current_price - prev_close) / prev_close) * 100
+            
+            ma5 = np.mean(closes[-5:])
+            ma20 = np.mean(closes[-20:])
+            std20 = np.std(closes[-20:])
+            upper_band = ma20 + (std20 * 2.0)
+            
+            avg_volume_20 = np.mean(volumes[-21:-1])
+            current_volume = volumes[-1]
+            vol_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0
+            
+            # --- [CASE 1: 이미 추적 중인 종목 모니터링] ---
+            if market in tracked_cache:
+                info = tracked_cache[market]
+                tp1 = info['tp1']
+                tp2 = info['tp2']
+                tp3 = info['tp3']
+                sl = info['sl']
+                reached = info.get('reached_targets', [])
+                
+                if current_price <= sl:
+                    notifications.append(f"🛑 **[손절가 이탈]** `{korean_name} ({market})`\n- 현재가 `{current_price:,.0f}원`이 손절가를 이탈했습니다.")
+                    del tracked_cache[market]
+                    continue
+                
+                if 3 not in reached and current_price >= tp3:
+                    notifications.append(f"🎯🔥 **[3차 목표가 최종 달성!]** `{korean_name} ({market})`\n- 최종 3차 목표가 돌파 완료!")
+                    del tracked_cache[market]
+                    continue
+                elif 2 not in reached and current_price >= tp2:
+                    notifications.append(f"🎯🚀 **[2차 목표가 달성!]** `{korean_name} ({market})`\n- 2차 목표가 도달!")
+                    reached.append(2)
+                elif 1 not in reached and current_price >= tp1:
+                    notifications.append(f"🎯✨ **[1차 목표가 달성!]** `{korean_name} ({market})`\n- 1차 목표가 도달!")
+                    reached.append(1)
+                
+                info['reached_targets'] = reached
+                tracked_cache[market] = info
+                continue
+
+            # --- [CASE 2: 15분봉 기준 바닥 슈팅 및 강력 돌파 포착 (아스타 패턴)] ---
+            # 거래량 2.5배 이상 폭증 + 상승률 +3% ~ +25% + 볼린저 상단 돌파 (정배열 조건 제거로 바닥권 슈팅 포착)
+            is_volume_explosion = vol_ratio >= 2.5
+            is_surge_range = (3.0 <= change_rate <= 25.0)
+            is_breakout = current_price >= upper_band
+            
+            if is_volume_explosion and is_surge_range and is_breakout:
+                recent_atr = np.mean(highs[-5:] - lows[-5:])
+                if recent_atr == 0: recent_atr = current_price * 0.01
+                
+                tp1 = current_price + (recent_atr * 1.5)
+                tp2 = current_price + (recent_atr * 3.0)
+                tp3 = current_price + (recent_atr * 5.0)
+                sl = min(np.min(lows[-3:]), ma20 * 0.95)
+                
+                tracked_cache[market] = {
+                    "time": current_time, 
+                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, 
+                    "reached_targets": []
+                }
+                
+                new_msg = (
+                    f"🚨🔥 **[15분봉 바닥 슈팅 / 수급 폭발 포착]** 🔥🚨\n\n"
+                    f"📌 **종목명**: `{korean_name}` (`{market}`)\n"
+                    f"💰 **현재가**: `{current_price:,.0f}원` (`+{change_rate:.2f}%`)\n\n"
+                    f"🎯 **1차 목표**: `{tp1:,.0f}원` (`+{((tp1-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🎯 **2차 목표**: `{tp2:,.0f}원` (`+{((tp2-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🎯 **3차 목표**: `{tp3:,.0f}원` (`+{((tp3-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🛑 **손절가**: `{sl:,.0f}원` (`{((sl-current_price)/current_price)*100:.1f}%`)\n\n"
+                    f"📊 **돌파 근거**:\n"
+                    f"• 15분봉 기준 평소 대비 **{vol_ratio:.1f}배** 거래량 광속 유입\n"
+                    f"• 볼린저밴드 상단 강한 돌파 및 장대양봉 발생"
+                )
+                notifications.append(new_msg)
+
+        except Exception as e:
+            pass
+
+    for msg in notifications:
+        send_telegram(msg)
+
+    save_cache(tracked_cache)
+    print("15분봉 스캔 완료.")
