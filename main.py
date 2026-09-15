@@ -44,20 +44,19 @@ def get_upbit_market_details():
     return market_dict
 
 if __name__ == "__main__":
-    print("⚡ [15분봉 초단기 폭발 & 바닥 돌파] 스캐너 가동 중...")
+    print("🌐 [올라운드 15분봉 통합 스캐너] 가동 중 (약상승 + 급등 + 바닥슈팅 모두 포착)...")
     
     market_dict = get_upbit_market_details()
     tracked_cache = load_cache()
     current_time = time.time()
     
-    # 12시간 지난 캐시는 자동 정리 (15분봉이므로 회전율 빠르게)
+    # 12시간 지난 캐시는 자동 정리
     tracked_cache = {k: v for k, v in tracked_cache.items() if current_time - v.get('time', 0) < 43200}
     
     notifications = []
 
     for market, korean_name in market_dict.items():
         try:
-            # 15분봉 데이터 30개 가져오기
             url = f"https://api.upbit.com/v1/candles/minutes/15?market={market}&count=30"
             res = requests.get(url).json()
             if len(res) < 25:
@@ -73,7 +72,6 @@ if __name__ == "__main__":
             prev_close = closes[-2]
             change_rate = ((current_price - prev_close) / prev_close) * 100
             
-            ma5 = np.mean(closes[-5:])
             ma20 = np.mean(closes[-20:])
             std20 = np.std(closes[-20:])
             upper_band = ma20 + (std20 * 2.0)
@@ -111,38 +109,57 @@ if __name__ == "__main__":
                 tracked_cache[market] = info
                 continue
 
-            # --- [CASE 2: 15분봉 기준 바닥 슈팅 및 강력 돌파 포착 (아스타 패턴)] ---
-            # 거래량 2.5배 이상 폭증 + 상승률 +3% ~ +25% + 볼린저 상단 돌파 (정배열 조건 제거로 바닥권 슈팅 포착)
-            is_volume_explosion = vol_ratio >= 2.5
-            is_surge_range = (3.0 <= change_rate <= 25.0)
-            is_breakout = current_price >= upper_band
+            recent_atr = np.mean(highs[-5:] - lows[-5:])
+            if recent_atr == 0: recent_atr = current_price * 0.01
+
+            # --- [CASE 2-A: 화끈한 강한 돌파 / 바닥 슈팅 (아스타 패턴 포함)] ---
+            # 조건: 거래량 2.2배 이상 + 상승률 +3% ~ +25% + (볼린저 돌파 또는 역배열 바닥 탈피)
+            is_strong_vol = vol_ratio >= 2.2
+            is_strong_change = (3.0 <= change_rate <= 25.0)
             
-            if is_volume_explosion and is_surge_range and is_breakout:
-                recent_atr = np.mean(highs[-5:] - lows[-5:])
-                if recent_atr == 0: recent_atr = current_price * 0.01
-                
+            if is_strong_vol and is_strong_change:
                 tp1 = current_price + (recent_atr * 1.5)
                 tp2 = current_price + (recent_atr * 3.0)
                 tp3 = current_price + (recent_atr * 5.0)
                 sl = min(np.min(lows[-3:]), ma20 * 0.95)
                 
-                tracked_cache[market] = {
-                    "time": current_time, 
-                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, 
-                    "reached_targets": []
-                }
+                tracked_cache[market] = {"time": current_time, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "reached_targets": []}
                 
                 new_msg = (
-                    f"🚨🔥 **[15분봉 바닥 슈팅 / 수급 폭발 포착]** 🔥🚨\n\n"
+                    f"🔥 **[급등 / 바닥 슈팅 포착]** 🔥\n\n"
                     f"📌 **종목명**: `{korean_name}` (`{market}`)\n"
                     f"💰 **현재가**: `{current_price:,.0f}원` (`+{change_rate:.2f}%`)\n\n"
                     f"🎯 **1차 목표**: `{tp1:,.0f}원` (`+{((tp1-current_price)/current_price)*100:.1f}%`)\n"
                     f"🎯 **2차 목표**: `{tp2:,.0f}원` (`+{((tp2-current_price)/current_price)*100:.1f}%`)\n"
                     f"🎯 **3차 목표**: `{tp3:,.0f}원` (`+{((tp3-current_price)/current_price)*100:.1f}%`)\n"
                     f"🛑 **손절가**: `{sl:,.0f}원` (`{((sl-current_price)/current_price)*100:.1f}%`)\n\n"
-                    f"📊 **돌파 근거**:\n"
-                    f"• 15분봉 기준 평소 대비 **{vol_ratio:.1f}배** 거래량 광속 유입\n"
-                    f"• 볼린저밴드 상단 강한 돌파 및 장대양봉 발생"
+                    f"📊 **포착 근거**: 평소 대비 거래량 `{vol_ratio:.1f}배` 폭발 및 강력한 수급 유입"
+                )
+                notifications.append(new_msg)
+                continue
+
+            # --- [CASE 2-B: 잔잔한 상승세 / 약상승 및 초입 수급] ---
+            # 조건: 거래량 1.6배 이상 + 상승률 +0.5% ~ +3.0% 미만 (하락장 속 약상승도 포함)
+            is_mild_vol = vol_ratio >= 1.6
+            is_mild_change = (0.5 <= change_rate < 3.0)
+            
+            if is_mild_vol and is_mild_change:
+                tp1 = current_price + (recent_atr * 1.0)
+                tp2 = current_price + (recent_atr * 2.0)
+                tp3 = current_price + (recent_atr * 3.5)
+                sl = min(np.min(lows[-3:]), ma20 * 0.97)
+                
+                tracked_cache[market] = {"time": current_time, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "reached_targets": []}
+                
+                new_msg = (
+                    f"⚡ **[약상승 / 수급 초입 포착]** ⚡\n\n"
+                    f"📌 **종목명**: `{korean_name}` (`{market}`)\n"
+                    f"💰 **현재가**: `{current_price:,.0f}원` (`+{change_rate:.2f}%`)\n\n"
+                    f"🎯 **1차 목표**: `{tp1:,.0f}원` (`+{((tp1-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🎯 **2차 목표**: `{tp2:,.0f}원` (`+{((tp2-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🎯 **3차 목표**: `{tp3:,.0f}원` (`+{((tp3-current_price)/current_price)*100:.1f}%`)\n"
+                    f"🛑 **손절가**: `{sl:,.0f}원` (`{((sl-current_price)/current_price)*100:.1f}%`)\n\n"
+                    f"📊 **포착 근거**: 거래량 `{vol_ratio:.1f}배` 유입 + 잔잔한 상승 모멘텀 발생"
                 )
                 notifications.append(new_msg)
 
@@ -153,4 +170,5 @@ if __name__ == "__main__":
         send_telegram(msg)
 
     save_cache(tracked_cache)
-    print("15분봉 스캔 완료.")
+    print("올라운드 스캔 완료.")
+
