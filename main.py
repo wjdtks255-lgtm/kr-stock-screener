@@ -63,7 +63,7 @@ def monitor_positions(start_date):
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
                 send_telegram(msg)
-                continue # 포지션 종료 (추적 목록에서 제외)
+                continue 
                 
             # TP2(2차 목표가) 도달 체크
             if high_price >= tp2:
@@ -76,9 +76,9 @@ def monitor_positions(start_date):
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
                 send_telegram(msg)
-                continue # 포지션 종료
+                continue 
                 
-            # TP1(1차 목표가) 도달 체크 (아직 TP1 도달 전인 경우에만)
+            # TP1(1차 목표가) 도달 체크
             if high_price >= tp1 and not pos.get('tp1_hit', False):
                 msg = (
                     f"🎯 <b>[1차 목표가(TP1) 달성!]</b>\n"
@@ -89,9 +89,8 @@ def monitor_positions(start_date):
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
                 send_telegram(msg)
-                pos['tp1_hit'] = True # TP1 달성 기록
+                pos['tp1_hit'] = True 
                 
-            # 아직 청산 조건에 안 걸린 경우 계속 추적
             updated_positions[ticker] = pos
             
         except Exception:
@@ -120,23 +119,23 @@ def analyze_stock(row, start_date):
         volume = latest['Volume']
         avg_vol_20 = df_20['Volume'].mean()
         
-        # 1. 캔들 조건: 양봉이면서 위꼬리가 몸통의 30% 이하인 강한 캔들
+        # 캔들 조건
         candle_body = close - open_p
         upper_tail = high - close
         if candle_body <= 0 or (upper_tail > candle_body * 0.3):
             return None
             
-        # 2. 거래량 조건: 전일 대비 200% 이상, 20일 평균 대비 150% 이상
+        # 거래량 조건
         if volume < prev['Volume'] * 2.0 or volume < avg_vol_20 * 1.5:
             return None
             
-        # 3. 이평선 조건: 5일선, 20일선 위에 위치
+        # 이평선 조건
         ma5 = df['Close'].rolling(5).mean().iloc[-1]
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
         if close < ma5 or close < ma20:
             return None
             
-        # 4. 리스크 관리: 현재가 기준 -4% 고정 손절 (안전벨트)
+        # 리스크 관리 (-4% 고정 손절)
         stop_loss = close * 0.96
         loss_rate = -4.0
         
@@ -165,11 +164,12 @@ def analyze_stock(row, start_date):
             f"━━━━━━━━━━━━━━━━━━━"
         )
         
+        # int64 에러 방지를 위해 명확하게 int()로 변환
         pos_data = {
             "name": name,
-            "target_1": target_1,
-            "target_2": target_2,
-            "stop_loss": stop_loss,
+            "target_1": int(target_1),
+            "target_2": int(target_2),
+            "stop_loss": int(stop_loss),
             "tp1_hit": False
         }
         
@@ -181,11 +181,9 @@ def run_screener():
     today = datetime.datetime.now()
     start_date = (today - datetime.timedelta(days=60)).strftime('%Y-%m-%d')
 
-    # 1단계: 기존 포지션 TP/SL 모니터링 실행
     print("=== 기존 포지션 모니터링 시작 ===")
     monitor_positions(start_date)
 
-    # 2단계: 신규 종목 스크리닝 실행
     print("=== 신규 종목 스크리닝 시작 ===")
     df_krx = fdr.StockListing('KRX')
     top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
@@ -210,7 +208,6 @@ def run_screener():
 
     save_positions(new_positions)
     
-    # 3단계: 탐색 및 모니터링 종료 알림 전송
     send_telegram("🏁 <b>[국장 종가베팅] 금일 종목 탐색 및 포지션 모니터링이 완료되었습니다.</b>")
 
 if __name__ == "__main__":
