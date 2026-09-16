@@ -48,9 +48,9 @@ def analyze_stock(row, start_date):
         if close < ma5 or close < ma20:
             return None
             
-        # 4. 현실적인 손절가 설정 (당일 시가 또는 5일선 부근 중 합리적인 선)
-        stop_loss = max(low, open_p * 0.98)
-        loss_rate = round(((stop_loss - close) / close) * 100, 2)
+        # 4. [리스크 관리 핵심] 손절가를 현재가 기준 무조건 -4%로 엄격하게 고정 (안전벨트)
+        stop_loss = close * 0.96
+        loss_rate = -4.0
         
         high_20 = df_20['High'].max()
         target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
@@ -72,7 +72,7 @@ def analyze_stock(row, start_date):
             f"💡 <b>포착 근거</b>\n"
             f"• 20일 이평선 돌파 및 5일선 지지\n"
             f"• 전일 대비 거래량 200% 이상 급증\n"
-            f"• 위꼬리 짧은 강한 장대양봉 형성\n\n"
+            f"• 칼같은 리스크 관리 (-4% 고정 손절)\n\n"
             f"📈 <a href='{chart_link}'>네이버 금융 차트 바로가기</a>\n"
             f"━━━━━━━━━━━━━━━━━━━"
         )
@@ -104,3 +104,4 @@ def run_screener():
 
 if __name__ == "__main__":
     run_screener()
+
