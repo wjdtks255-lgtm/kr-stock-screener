@@ -18,11 +18,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 여기가 핵심 수정 포인트입니다! (pip 업그레이드 추가)
+      # 패키지명을 소문자 finance-datareader로 수정 완료
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests FinanceDataReader
+          pip install requests finance-datareader
 
       - name: Run screener and tracker
         env:
