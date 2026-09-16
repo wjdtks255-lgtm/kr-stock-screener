@@ -1,0 +1,72 @@
+{
+    "010170": {
+        "name": "대한광통신",
+        "target_1": 16879,
+        "target_2": 17723,
+        "stop_loss": 15580,
+        "tp1_hit": false
+    },
+    "072950": {
+        "name": "빛샘전자",
+        "target_1": 14466,
+        "target_2": 15189,
+        "stop_loss": 13353,
+        "tp1_hit": false
+    },
+    "043260": {
+        "name": "성호전자",
+        "target_1": 20400,
+        "target_2": 21420,
+        "stop_loss": 18124,
+        "tp1_hit": false
+    },
+    "452280": {
+        "name": "한선엔지니어링",
+        "target_1": 13880,
+        "target_2": 14574,
+        "stop_loss": 12864,
+        "tp1_hit": false
+    },
+    "126340": {
+        "name": "비나텍",
+        "target_1": 79456,
+        "target_2": 83428,
+        "stop_loss": 73344,
+        "tp1_hit": false
+    },
+    "195870": {
+        "name": "해성디에스",
+        "target_1": 57500,
+        "target_2": 60375,
+        "stop_loss": 53856,
+        "tp1_hit": false
+    },
+    "049080": {
+        "name": "기가레인",
+        "target_1": 11429,
+        "target_2": 12001,
+        "stop_loss": 10550,
+        "tp1_hit": false
+    },
+    "357580": {
+        "name": "아모센스",
+        "target_1": 6905,
+        "target_2": 7250,
+        "stop_loss": 6374,
+        "tp1_hit": false
+    },
+    "406820": {
+        "name": "뷰티스킨",
+        "target_1": 2641,
+        "target_2": 2773,
+        "stop_loss": 2438,
+        "tp1_hit": false
+    },
+    "089890": {
+        "name": "코세스",
+        "target_1": 29120,
+        "target_2": 30576,
+        "stop_loss": 26880,
+        "tp1_hit": false
+    }
+}
