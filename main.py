@@ -98,7 +98,7 @@ if __name__ == "__main__":
         try:
             # 유동성 필터: 24시간 거래대금 300억 원 미만인 코인은 원천 차단 (노이즈 제거)
             acc_trade_price = trade_prices_24h.get(market, 0)
-            if acc_trade_price < 30,000,000,000: # 300억 미만 스킵
+            if acc_trade_price < 30000000000: # 300억 미만 스킵
                 continue
 
             url = f"https://api.upbit.com/v1/candles/minutes/15?market={market}&count=30"
