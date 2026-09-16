@@ -56,15 +56,23 @@ def analyze_stock(row, start_date):
         target_2_rate = round(((target_2 - close) / close) * 100, 2)
         
         chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
-        reason = "20일 이평선 돌파 및 5일선 지지확인 / 전일 대비 거래량 200% 이상 유입 / 위꼬리 짧은 강한 장대양봉"
-
-        msg = f"<b>{name}({ticker})</b>\n" \
-              f"현재가: {int(close):,}원\n" \
-              f"1차목표가: {int(target_1):,}원 ({target_1_rate:+}%)\n" \
-              f"2차목표가: {int(target_2):,}원 ({target_2_rate:+}%)\n" \
-              f"손절가: {int(stop_loss):,}원 ({loss_rate:+}%)\n" \
-              f"간단한상승근거: {reason}\n" \
-              f"주식차트링크: {chart_link}"
+        
+        # [디자인 개선된 메시지 포맷]
+        msg = (
+            f"🚨 <b>[국장 종가베팅 포착]</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>{name}</b> <code>({ticker})</code>\n\n"
+            f"💰 <b>현재가:</b> <code>{int(close):,}원</code>\n\n"
+            f"🎯 <b>Target 1:</b> <code>{int(target_1):,}원</code> <code>({target_1_rate:+.2f}%)</code>\n"
+            f"🎯 <b>Target 2:</b> <code>{int(target_2):,}원</code> <code>({target_2_rate:+.2f}%)</code>\n"
+            f"🛡️ <b>Stop Loss:</b> <code>{int(stop_loss):,}원</code> <code>({loss_rate:+.2f}%)</code>\n\n"
+            f"💡 <b>포착 근거</b>\n"
+            f"• 20일 이평선 돌파 및 5일선 지지\n"
+            f"• 전일 대비 거래량 200% 이상 급증\n"
+            f"• 위꼬리 짧은 강한 장대양봉 형성\n\n"
+            f"📈 <a href='{chart_link}'>네이버 금융 차트 바로가기</a>\n"
+            f"━━━━━━━━━━━━━━━━━━━"
+        )
         return msg
     except Exception:
         return None
@@ -86,19 +94,10 @@ def run_screener():
                 signals.append(result)
 
     if not signals:
-        send_telegram("현재 조건에 부합하는 종가매매 종목이 없습니다.")
+        send_telegram("⚠️ 현재 조건에 부합하는 종가매매 종목이 없습니다.")
     else:
         for signal in signals[:5]:
             send_telegram(signal)
 
 if __name__ == "__main__":
-    # 비공개 채널 ID 확인용 로그 출력
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        res = requests.get(url).json()
-        print("=== 텔레그램 채널/유저 ID 확인 로그 ===")
-        print(res)
-    except Exception as e:
-        print("ID 확인 로그 출력 실패:", e)
-
     run_screener()
