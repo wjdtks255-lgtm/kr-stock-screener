@@ -26,5 +26,47 @@
         "target_2": 30576,
         "stop_loss": 26880,
         "tp1_hit": false
+    },
+    "082740": {
+        "name": "한화엔진",
+        "target_1": 55848,
+        "target_2": 58640,
+        "stop_loss": 51552,
+        "tp1_hit": false
+    },
+    "042370": {
+        "name": "비츠로테크",
+        "target_1": 11897,
+        "target_2": 12492,
+        "stop_loss": 10982,
+        "tp1_hit": false
+    },
+    "272210": {
+        "name": "한화시스템",
+        "target_1": 82680,
+        "target_2": 86814,
+        "stop_loss": 76320,
+        "tp1_hit": false
+    },
+    "295310": {
+        "name": "에이치브이엠",
+        "target_1": 63960,
+        "target_2": 67158,
+        "stop_loss": 59040,
+        "tp1_hit": false
+    },
+    "200470": {
+        "name": "에이팩트",
+        "target_1": 7508,
+        "target_2": 7884,
+        "stop_loss": 6931,
+        "tp1_hit": false
+    },
+    "478340": {
+        "name": "나라스페이스테크놀로지",
+        "target_1": 14404,
+        "target_2": 15124,
+        "stop_loss": 13296,
+        "tp1_hit": false
     }
 }
