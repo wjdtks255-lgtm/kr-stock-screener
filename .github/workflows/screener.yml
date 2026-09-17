@@ -1,43 +1,47 @@
-name: K-Stock Closing Screener
+name: Stock Auto Trading Bot
 
 on:
   schedule:
-    # 1) 오전 9시 ~ 오후 3시 30분 사이 5분마다 보유 포지션 모니터링
-    # (KST 09:00~15:30 ➔ UTC 00:00~06:30)
+    # 1) 평일 오전 9시 ~ 오후 3시 30분 사이 5분마다 보유 포지션 모니터링
     - cron: '*/5 0-6 * * 1-5'
     
-    # 2) 오후 3시 15분에 종가베팅 스크리닝 1회 실행 (매수 전 15분 여유)
-    # (KST 15:15 ➔ UTC 06:15)
+    # 2) 평일 오후 3시 15분에 종가베팅 스크리닝 실행 (GitHub 자체 스케줄 보완용)
     - cron: '15 6 * * 1-5'
-    
+
+  # 💡 cron-job.org의 외부 POST 요청을 받기 위한 핵심 설정
+  repository_dispatch:
+    types: [run_screener]
+
   workflow_dispatch:
 
 jobs:
-  run-screener:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests finance-datareader
+          pip install pykrx pandas requests
 
-      - name: Run screener and tracker
+      - name: Determine action type and Run Bot
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          # GitHub 스케줄 중 15분(종가베팅 시간)이거나 외부 디스패치 신호일 때 스크리너 실행, 나머지는 모니터링 실행
+          # (간단하게 cron-job.org가 정확한 시간에 스크리너를 찌르도록 유도)
           python main.py
 
-      - name: Save active positions to repo
-        uses: stefanzweifel/git-auto-commit-action@v4
+      - name: Commit and push updated active positions
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Update active positions tracking state"
-          file_pattern: active_positions.json
+          commit_message: "Auto update active_positions.json"
+          file_patterns: active_positions.json
