@@ -137,7 +137,7 @@ def run_screener():
             
             chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
-            # 1. 종가매매 알림 (진입가, 손절가뿐만 아니라 목표가까지 모두 포함하도록 수정)
+            # 1. 종가매매 알림 (진입가, 손절가, 목표가 포함)
             closing_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
@@ -182,3 +182,4 @@ def run_screener():
 
 if __name__ == "__main__":
     run_screener()
+
