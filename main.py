@@ -108,7 +108,7 @@ def run_screener():
             prev = df.iloc[-2]
             df_20 = df.iloc[-20:]
             
-            close = latest['Close'] # 3시 15분~장 마감 기준 현재가(종가)
+            close = latest['Close'] 
             open_p = latest['Open']
             high = latest['High']
             volume = latest['Volume']
@@ -129,9 +129,7 @@ def run_screener():
             if close < ma5 or close < ma20:
                 continue
                 
-            # 가격 깔끔하게 정리 (10원 또는 50원 단위 등 보기 편하게 반올림 처리)
             stop_loss = round(close * 0.96, -1)
-            
             high_20 = df_20['High'].max()
             raw_target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
             target_1 = round(raw_target_1, -1)
@@ -139,16 +137,18 @@ def run_screener():
             
             chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
-            # 1. 종가매매 알림 (진입가와 손절가 중심)
+            # 1. 종가매매 알림 (진입가, 손절가뿐만 아니라 목표가까지 모두 포함하도록 수정)
             closing_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
                 f"🛡️ <b>손절가(SL):</b> <code>{int(stop_loss):,}원</code>\n"
+                f"🎯 <b>1차 목표가(TP1):</b> <code>{int(target_1):,}원</code>\n"
+                f"🎯 <b>2차 목표가(TP2):</b> <code>{int(target_2):,}원</code>\n"
                 f"📈 <a href='{chart_link}'>네이버 차트</a>"
             )
             closing_signals.append(closing_msg)
             
-            # 2. 시초가매매 알림 (진입 기준과 TP1, TP2 목표가 중심)
+            # 2. 시초가매매 알림
             morning_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>기준가(오늘종가):</b> <code>{int(close):,}원</code>\n"
