@@ -1,38 +1,17 @@
 {
-    "010170": {
-        "name": "대한광통신",
-        "target_1": 16879,
-        "target_2": 17723,
-        "stop_loss": 15580,
-        "tp1_hit": false
-    },
-    "072950": {
-        "name": "빛샘전자",
-        "target_1": 14466,
-        "target_2": 15189,
-        "stop_loss": 13353,
-        "tp1_hit": false
-    },
-    "043260": {
-        "name": "성호전자",
-        "target_1": 20400,
-        "target_2": 21420,
-        "stop_loss": 18124,
-        "tp1_hit": false
-    },
     "452280": {
         "name": "한선엔지니어링",
         "target_1": 13880,
         "target_2": 14574,
         "stop_loss": 12864,
-        "tp1_hit": false
+        "tp1_hit": true
     },
     "126340": {
         "name": "비나텍",
         "target_1": 79456,
         "target_2": 83428,
         "stop_loss": 73344,
-        "tp1_hit": false
+        "tp1_hit": true
     },
     "195870": {
         "name": "해성디에스",
@@ -41,32 +20,74 @@
         "stop_loss": 53856,
         "tp1_hit": false
     },
-    "049080": {
-        "name": "기가레인",
-        "target_1": 11429,
-        "target_2": 12001,
-        "stop_loss": 10550,
-        "tp1_hit": false
-    },
-    "357580": {
-        "name": "아모센스",
-        "target_1": 6905,
-        "target_2": 7250,
-        "stop_loss": 6374,
-        "tp1_hit": false
-    },
-    "406820": {
-        "name": "뷰티스킨",
-        "target_1": 2641,
-        "target_2": 2773,
-        "stop_loss": 2438,
-        "tp1_hit": false
-    },
     "089890": {
         "name": "코세스",
         "target_1": 29120,
         "target_2": 30576,
         "stop_loss": 26880,
+        "tp1_hit": false
+    },
+    "099520": {
+        "name": "DGI",
+        "target_1": 1335,
+        "target_2": 1402,
+        "stop_loss": 1232,
+        "tp1_hit": false
+    },
+    "000300": {
+        "name": "DH오토넥스",
+        "target_1": 4368,
+        "target_2": 4586,
+        "stop_loss": 4032,
+        "tp1_hit": false
+    },
+    "245620": {
+        "name": "EDGC",
+        "target_1": 770,
+        "target_2": 809,
+        "stop_loss": 711,
+        "tp1_hit": false
+    },
+    "0099X0": {
+        "name": "IBKS제25호스팩",
+        "target_1": 2267,
+        "target_2": 2380,
+        "stop_loss": 2092,
+        "tp1_hit": false
+    },
+    "469480": {
+        "name": "IBKS제24호스팩",
+        "target_1": 2215,
+        "target_2": 2325,
+        "stop_loss": 2044,
+        "tp1_hit": false
+    },
+    "009440": {
+        "name": "KC그린홀딩스",
+        "target_1": 786,
+        "target_2": 825,
+        "stop_loss": 725,
+        "tp1_hit": false
+    },
+    "119650": {
+        "name": "KC코트렐",
+        "target_1": 954,
+        "target_2": 1002,
+        "stop_loss": 881,
+        "tp1_hit": false
+    },
+    "044180": {
+        "name": "KD",
+        "target_1": 213,
+        "target_2": 223,
+        "stop_loss": 196,
+        "tp1_hit": false
+    },
+    "099220": {
+        "name": "SDN",
+        "target_1": 531,
+        "target_2": 558,
+        "stop_loss": 490,
         "tp1_hit": false
     }
 }
