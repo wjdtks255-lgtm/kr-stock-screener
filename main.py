@@ -1,8 +1,9 @@
 import os
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta  # 👈 이 부분을 이렇게 수정해 주세요!
 import FinanceDataReader as fdr
+
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
