@@ -29,44 +29,51 @@
     },
     "082740": {
         "name": "한화엔진",
-        "target_1": 55848,
-        "target_2": 58640,
-        "stop_loss": 51552,
+        "target_1": 55950,
+        "target_2": 58750,
+        "stop_loss": 51650,
         "tp1_hit": false
     },
     "042370": {
         "name": "비츠로테크",
-        "target_1": 11897,
-        "target_2": 12492,
-        "stop_loss": 10982,
+        "target_1": 11900,
+        "target_2": 12500,
+        "stop_loss": 10980,
         "tp1_hit": false
     },
     "272210": {
         "name": "한화시스템",
-        "target_1": 82680,
-        "target_2": 86814,
-        "stop_loss": 76320,
+        "target_1": 82780,
+        "target_2": 86920,
+        "stop_loss": 76420,
         "tp1_hit": false
     },
     "295310": {
         "name": "에이치브이엠",
-        "target_1": 63960,
-        "target_2": 67158,
-        "stop_loss": 59040,
+        "target_1": 64170,
+        "target_2": 67380,
+        "stop_loss": 59230,
+        "tp1_hit": false
+    },
+    "456010": {
+        "name": "아이씨티케이",
+        "target_1": 22360,
+        "target_2": 23480,
+        "stop_loss": 20640,
         "tp1_hit": false
     },
     "200470": {
         "name": "에이팩트",
-        "target_1": 7508,
-        "target_2": 7884,
-        "stop_loss": 6931,
+        "target_1": 7520,
+        "target_2": 7900,
+        "stop_loss": 6940,
         "tp1_hit": false
     },
     "478340": {
         "name": "나라스페이스테크놀로지",
-        "target_1": 14404,
-        "target_2": 15124,
-        "stop_loss": 13296,
+        "target_1": 14400,
+        "target_2": 15120,
+        "stop_loss": 13300,
         "tp1_hit": false
     }
 }
