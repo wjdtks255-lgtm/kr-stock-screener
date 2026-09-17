@@ -83,7 +83,7 @@ def run_screener():
     print("=== 보유 포지션 모니터링 수행 ===")
     monitor_positions(start_date)
 
-    print("=== [종가베팅] 신규 종목 스크리닝 시작 ===")
+    print("=== [종가 및 시초가 전략] 신규 종목 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
         top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
@@ -91,7 +91,8 @@ def run_screener():
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
         return
 
-    signals = []
+    closing_signals = []  # 종가매매용 알림 리스트
+    morning_signals = []  # 시초가매매용 알림 리스트
     new_positions = load_positions() 
 
     for _, row in top_300.iterrows():
@@ -134,16 +135,26 @@ def run_screener():
             target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
             target_2 = target_1 * 1.05
             
-            msg = (
-                f"🚨 <b>[종가베팅 포착]</b>\n"
-                f"📌 <b>{name}</b> <code>({ticker})</code>\n"
-                f"💰 <b>현재가:</b> <code>{int(close):,}원</code>\n"
-                f"🎯 <b>Target 1:</b> <code>{int(target_1):,}원</code>\n"
-                f"🎯 <b>Target 2:</b> <code>{int(target_2):,}원</code>\n"
-                f"🛡️ <b>Stop Loss:</b> <code>{int(stop_loss):,}원</code>"
-            )
+            chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
-            signals.append(msg)
+            # 1. 종가매매 알림용 포맷 (오늘 장 마감 전 동시호가 진입용)
+            closing_msg = (
+                f"📌 <b>{name}</b> <code>({ticker})</code>\n"
+                f"💰 <b>현재가(종가예상):</b> <code>{int(close):,}원</code>\n"
+                f"🛡️ <b>손절가(SL):</b> <code>{int(stop_loss):,}원</code>\n"
+                f"📈 <a href='{chart_link}'>네이버 차트</a>"
+            )
+            closing_signals.append(closing_msg)
+            
+            # 2. 시초가매매 알림용 포맷 (내일 아침 갭상승/슈팅 공략용)
+            morning_msg = (
+                f"📌 <b>{name}</b> <code>({ticker})</code>\n"
+                f"🎯 <b>1차 목표(시초공략):</b> <code>{int(target_1):,}원</code>\n"
+                f"🎯 <b>2차 목표:</b> <code>{int(target_2):,}원</code>\n"
+                f"💡 <i>오늘 강한 거래량 마감 ➔ 내일 아침 시초가 갭 공략 후보</i>"
+            )
+            morning_signals.append(morning_msg)
+            
             new_positions[ticker] = {
                 "name": name,
                 "target_1": int(target_1),
@@ -154,15 +165,20 @@ def run_screener():
         except Exception:
             continue
 
-    if signals:
-        for signal in signals[:5]:
-            send_telegram(signal)
+    # 텔레그램 전송 (종가매매와 시초가매매 섹션 구분)
+    if closing_signals:
+        # 1) 종가매매 알림 발송 (최대 5개)
+        closing_text = "🚨 <b>[1] 오늘의 종가매매 (장 마감 전 진입)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
+        send_telegram(closing_text)
+        
+        # 2) 시초가매매 알림 발송 (최대 5개)
+        morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals[:5])
+        send_telegram(morning_text)
     else:
-        send_telegram("⚠️ 오늘 조건에 부합하는 종가베팅 종목이 없습니다.")
+        send_telegram("⚠️ 오늘 조건에 부합하는 종가/시초가 매매 종목이 없습니다.")
 
     save_positions(new_positions)
-    send_telegram("🏁 <b>[국장 종가베팅] 모니터링 및 스크리닝 완료!</b>")
+    send_telegram("🏁 <b>[국장 자동화] 스크리닝 및 포지션 갱신 완료!</b>")
 
 if __name__ == "__main__":
     run_screener()
-
