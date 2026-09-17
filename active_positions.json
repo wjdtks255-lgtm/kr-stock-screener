@@ -34,18 +34,18 @@
         "stop_loss": 51650,
         "tp1_hit": false
     },
-    "042370": {
-        "name": "비츠로테크",
-        "target_1": 11900,
-        "target_2": 12500,
-        "stop_loss": 10980,
-        "tp1_hit": false
-    },
     "272210": {
         "name": "한화시스템",
         "target_1": 82780,
         "target_2": 86920,
         "stop_loss": 76420,
+        "tp1_hit": false
+    },
+    "042370": {
+        "name": "비츠로테크",
+        "target_1": 11900,
+        "target_2": 12500,
+        "stop_loss": 10980,
         "tp1_hit": false
     },
     "295310": {
