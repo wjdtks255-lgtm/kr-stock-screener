@@ -2,7 +2,8 @@ name: Stock Auto Trading Bot
 
 on:
   schedule:
-    - cron: '15 6 * * 1-5'  # 한국 시간 평일 오후 3시 15분 장 마감 전 실행
+    # UTC 기준 오전 6시 0분 = 한국 시간 평일 오후 3시 0분 실행 (연산 시간 고려하여 15~20분경 전송)
+    - cron: '0 6 * * 1-5'
 
   workflow_dispatch:
 
