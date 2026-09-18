@@ -6,74 +6,46 @@
         "stop_loss": 12864,
         "tp1_hit": true
     },
-    "126340": {
-        "name": "비나텍",
-        "target_1": 79456,
-        "target_2": 83428,
-        "stop_loss": 73344,
-        "tp1_hit": true
-    },
-    "195870": {
-        "name": "해성디에스",
-        "target_1": 57500,
-        "target_2": 60375,
-        "stop_loss": 53856,
-        "tp1_hit": false
-    },
     "089890": {
         "name": "코세스",
         "target_1": 29120,
         "target_2": 30576,
         "stop_loss": 26880,
+        "tp1_hit": true
+    },
+    "007610": {
+        "name": "선도전기",
+        "target_1": 5140,
+        "target_2": 5400,
+        "stop_loss": 4750,
         "tp1_hit": false
     },
-    "082740": {
-        "name": "한화엔진",
-        "target_1": 55950,
-        "target_2": 58750,
-        "stop_loss": 51650,
+    "265740": {
+        "name": "엔에프씨",
+        "target_1": 8580,
+        "target_2": 9010,
+        "stop_loss": 7920,
         "tp1_hit": false
     },
-    "272210": {
-        "name": "한화시스템",
-        "target_1": 82780,
-        "target_2": 86920,
-        "stop_loss": 76420,
+    "420770": {
+        "name": "기가비스",
+        "target_1": 117620,
+        "target_2": 123500,
+        "stop_loss": 108580,
         "tp1_hit": false
     },
-    "042370": {
-        "name": "비츠로테크",
-        "target_1": 11900,
-        "target_2": 12500,
-        "stop_loss": 10980,
+    "456070": {
+        "name": "이엔셀",
+        "target_1": 6880,
+        "target_2": 7220,
+        "stop_loss": 6360,
         "tp1_hit": false
     },
-    "295310": {
-        "name": "에이치브이엠",
-        "target_1": 64170,
-        "target_2": 67380,
-        "stop_loss": 59230,
-        "tp1_hit": false
-    },
-    "456010": {
-        "name": "아이씨티케이",
-        "target_1": 22360,
-        "target_2": 23480,
-        "stop_loss": 20640,
-        "tp1_hit": false
-    },
-    "200470": {
-        "name": "에이팩트",
-        "target_1": 7520,
-        "target_2": 7900,
-        "stop_loss": 6940,
-        "tp1_hit": false
-    },
-    "478340": {
-        "name": "나라스페이스테크놀로지",
-        "target_1": 14400,
-        "target_2": 15120,
-        "stop_loss": 13300,
+    "001520": {
+        "name": "동양",
+        "target_1": 1410,
+        "target_2": 1480,
+        "stop_loss": 1300,
         "tp1_hit": false
     }
 }
