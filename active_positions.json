@@ -12,40 +12,5 @@
         "target_2": 30576,
         "stop_loss": 26880,
         "tp1_hit": true
-    },
-    "007610": {
-        "name": "선도전기",
-        "target_1": 5140,
-        "target_2": 5400,
-        "stop_loss": 4750,
-        "tp1_hit": false
-    },
-    "265740": {
-        "name": "엔에프씨",
-        "target_1": 8580,
-        "target_2": 9010,
-        "stop_loss": 7920,
-        "tp1_hit": false
-    },
-    "420770": {
-        "name": "기가비스",
-        "target_1": 117620,
-        "target_2": 123500,
-        "stop_loss": 108580,
-        "tp1_hit": false
-    },
-    "456070": {
-        "name": "이엔셀",
-        "target_1": 6880,
-        "target_2": 7220,
-        "stop_loss": 6360,
-        "tp1_hit": false
-    },
-    "001520": {
-        "name": "동양",
-        "target_1": 1410,
-        "target_2": 1480,
-        "stop_loss": 1300,
-        "tp1_hit": false
     }
 }
