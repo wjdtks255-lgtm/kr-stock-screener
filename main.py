@@ -39,10 +39,11 @@ def monitor_positions(start_date):
     for ticker, pos in positions.items():
         try:
             df = fdr.DataReader(ticker, start_date)
-            if len(df) == 0:
+            if len(df) < 2:
                 updated_positions[ticker] = pos
                 continue
                 
+            # 가장 마지막 거래일(가장 최근 장 마감일) 데이터 기준로만 손절/목표가 체크
             latest = df.iloc[-1]
             high_price = latest['High']
             low_price = latest['Low']
@@ -52,16 +53,24 @@ def monitor_positions(start_date):
             tp2 = pos['target_2']
             sl = pos['stop_loss']
             
+            # 이미 처리된 종목이 오늘 또 중복 알림 안 가도록 방어
+            if pos.get('status') in ['STOP', 'TP2']:
+                continue
+
             # SL(손절가) 체크
             if low_price <= sl:
                 msg = f"🛡️ <b>[손절가(SL) 도달]</b>\n📌 <b>{name}</b> <code>({ticker})</code>\n❌ 이탈 가격: <code>{int(sl):,}원 이하</code>"
                 send_telegram(msg)
+                pos['status'] = 'STOP'
+                updated_positions[ticker] = pos
                 continue 
                 
             # TP2(2차 목표가) 체크
             if high_price >= tp2:
                 msg = f"🎯 <b>[2차 목표가(TP2) 달성]</b>\n📌 <b>{name}</b> <code>({ticker})</code>\n🔥 달성 가격: <code>{int(tp2):,}원 돌파!</code>"
                 send_telegram(msg)
+                pos['status'] = 'TP2'
+                updated_positions[ticker] = pos
                 continue 
                 
             # TP1(1차 목표가) 체크
@@ -86,7 +95,6 @@ def run_screener():
     print("=== [주도주 무제한] 최고급 저항돌파 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
-        # 거래대금 상위 300개 종목 대상
         top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
@@ -115,30 +123,30 @@ def run_screener():
             volume = latest['Volume']
             amount = latest['Amount']
             
-            # 주가 가격 제한은 완전히 풀었습니다! (비싼 주식도 오를 놈이면 다 잡음)
+            # [무제한 조건] 가격 제한 없음 (비싼 주식, 낮은 주식 모두 거래대금만 보면 통과)
             
-            # 단, 확실한 수급을 위해 당일 거래대금 100억 이상 조건은 유지
+            # 당일 거래대금 100억 이상 수급 조건[span_8](start_span)[span_8](end_span)
             if amount < 100_0000_000:
                 continue
 
             avg_vol_20 = df_30['Volume'].mean()
             
-            # 1. 기본 양봉 및 상승률 조건 (3% 이상 상승)
+            # 1. 기본 양봉 및 상승률 조건 (3% 이상 상승)[span_9](start_span)[span_9](end_span)
             candle_body = close - open_p
             if candle_body <= 0:
                 continue
             if (close - prev['Close']) / prev['Close'] < 0.03:
                 continue
                 
-            # 2. 윗꼬리 제한 (고가 대비 -1.5% 이내로 매물을 완벽히 소화하며 마감)
+            # 2. 윗꼬리 제한 (고가 대비 -1.5% 이내 마감)[span_10](start_span)[span_10](end_span)
             if high > close and (high - close) / high > 0.015:
                 continue
                 
-            # 3. 거래량 폭증 조건 (전일 대비 2배 또는 20일 평균 대비 2배 이상)
+            # 3. 거래량 폭증 조건 (전일 대비 2배 또는 20일 평균 대비 2배 이상)[span_11](start_span)[span_11](end_span)
             if volume < prev['Volume'] * 2.0 and volume < avg_vol_20 * 2.0:
                 continue
                 
-            # 4. 이평선 정배열 (5일 > 20일 > 60일 우상향 추세)
+            # 4. 이평선 정배열 (5일 > 20일 > 60일 우상향)[span_12](start_span)[span_12](end_span)
             ma5 = df['Close'].rolling(5).mean().iloc[-1]
             ma20 = df['Close'].rolling(20).mean().iloc[-1]
             ma60 = df['Close'].rolling(60).mean().iloc[-1]
@@ -146,7 +154,7 @@ def run_screener():
             if not (close > ma5 > ma20 > ma60):
                 continue
                 
-            # 5. 전고점/저항선 돌파 직전 또는 밀집 (-3.5% 이내)
+            # 5. 전고점/저항선 돌파 임박 (-3.5% 이내)[span_13](start_span)[span_13](end_span)
             high_30 = df_30['High'].max()
             if close < high_30 * 0.965:
                 continue 
@@ -182,7 +190,8 @@ def run_screener():
                 "target_1": int(target_1),
                 "target_2": int(target_2),
                 "stop_loss": int(stop_loss),
-                "tp1_hit": False
+                "tp1_hit": False,
+                "status": "ACTIVE"
             }
         except Exception:
             continue
