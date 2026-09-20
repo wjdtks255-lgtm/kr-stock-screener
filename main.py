@@ -83,9 +83,10 @@ def run_screener():
     print("=== 보유 포지션 모니터링 수행 ===")
     monitor_positions(start_date)
 
-    print("=== [돌파 패턴 기반] 종가 및 시초가 전략 스크리닝 시작 ===")
+    print("=== [주도주 무제한] 최고급 저항돌파 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
+        # 거래대금 상위 300개 종목 대상
         top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
@@ -101,53 +102,62 @@ def run_screener():
         
         try:
             df = fdr.DataReader(ticker, start_date)
-            if len(df) < 20:
+            if len(df) < 30:
                 continue
             
             latest = df.iloc[-1]
             prev = df.iloc[-2]
-            df_20 = df.iloc[-20:]
+            df_30 = df.iloc[-30:]
             
             close = latest['Close'] 
             open_p = latest['Open']
             high = latest['High']
             volume = latest['Volume']
-            avg_vol_20 = df_20['Volume'].mean()
+            amount = latest['Amount']
             
-            # 1. 기본 양봉 및 상승률 조건 (2.5% 이상 상승)
+            # 주가 가격 제한은 완전히 풀었습니다! (비싼 주식도 오를 놈이면 다 잡음)
+            
+            # 단, 확실한 수급을 위해 당일 거래대금 100억 이상 조건은 유지
+            if amount < 100_0000_000:
+                continue
+
+            avg_vol_20 = df_30['Volume'].mean()
+            
+            # 1. 기본 양봉 및 상승률 조건 (3% 이상 상승)
             candle_body = close - open_p
             if candle_body <= 0:
                 continue
-            if (close - prev['Close']) / prev['Close'] < 0.025:
+            if (close - prev['Close']) / prev['Close'] < 0.03:
                 continue
                 
-            # 2. 윗꼬리 제한 (몸통의 15% 이하로 마감하여 매물 소화가 잘 된 형태)
-            if (high - close) > candle_body * 0.15:
+            # 2. 윗꼬리 제한 (고가 대비 -1.5% 이내로 매물을 완벽히 소화하며 마감)
+            if high > close and (high - close) / high > 0.015:
                 continue
                 
-            # 3. 거래량 폭증 조건 (전일 대비 2.5배 또는 20일 평균 대비 2배 이상)
-            if volume < prev['Volume'] * 2.5 or volume < avg_vol_20 * 2.0:
+            # 3. 거래량 폭증 조건 (전일 대비 2배 또는 20일 평균 대비 2배 이상)
+            if volume < prev['Volume'] * 2.0 and volume < avg_vol_20 * 2.0:
                 continue
                 
-            # 4. 이평선 정배열 조건 (5일선, 20일선 위)
+            # 4. 이평선 정배열 (5일 > 20일 > 60일 우상향 추세)
             ma5 = df['Close'].rolling(5).mean().iloc[-1]
             ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            if close < ma5 or close < ma20:
+            ma60 = df['Close'].rolling(60).mean().iloc[-1]
+            
+            if not (close > ma5 > ma20 > ma60):
                 continue
                 
-            # 5. [신규 추가] 전고점 및 저항선 돌파/테스트 패턴 필터 (최근 20일 고점 대비 -3% 이내 밀집 또는 돌파)
-            high_20 = df_20['High'].max()
-            if close < high_20 * 0.97:
-                continue  # 전고점/저항선 부근에 도달하지 못한 종목은 제외
+            # 5. 전고점/저항선 돌파 직전 또는 밀집 (-3.5% 이내)
+            high_30 = df_30['High'].max()
+            if close < high_30 * 0.965:
+                continue 
                 
             stop_loss = round(close * 0.96, -1)
-            raw_target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
+            raw_target_1 = high_30 if high_30 > close * 1.02 else close * 1.04
             target_1 = round(raw_target_1, -1)
-            target_2 = round(target_1 * 1.05, -1)
+            target_2 = round(target_1 * 1.06, -1)
             
             chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
-            # 종가매매 알림 텍스트
             closing_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
@@ -158,7 +168,6 @@ def run_screener():
             )
             closing_signals.append(closing_msg)
             
-            # 시초가매매 알림 텍스트
             morning_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>기준가(오늘종가):</b> <code>{int(close):,}원</code>\n"
@@ -179,16 +188,16 @@ def run_screener():
             continue
 
     if closing_signals:
-        closing_text = "🚨 <b>[1] 오늘의 저항돌파 종가베팅 (장 마감 전 진입)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
+        closing_text = "🚨 <b>[1] 주도주 무제한 저항돌파 종가베팅</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
         send_telegram(closing_text)
         
         morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals[:5])
         send_telegram(morning_text)
     else:
-        send_telegram("⚠️ 오늘 저항 돌파/고점 밀집 조건에 부합하는 종목이 없습니다.")
+        send_telegram("⚠️ 오늘 무제한 조건에 부합하는 주도주가 없습니다.")
 
     save_positions(new_positions)
-    send_telegram("🏁 <b>[국장 자동화] 저항돌파 스크리닝 및 포지션 갱신 완료!</b>")
+    send_telegram("🏁 <b>[국장 자동화] 스크리닝 완료!</b>")
 
 if __name__ == "__main__":
     run_screener()
