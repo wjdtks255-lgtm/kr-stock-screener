@@ -83,7 +83,7 @@ def run_screener():
     print("=== 보유 포지션 모니터링 수행 ===")
     monitor_positions(start_date)
 
-    print("=== [종가 및 시초가 전략] 신규 종목 스크리닝 시작 ===")
+    print("=== [돌파 패턴 기반] 종가 및 시초가 전략 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
         top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
@@ -114,30 +114,40 @@ def run_screener():
             volume = latest['Volume']
             avg_vol_20 = df_20['Volume'].mean()
             
+            # 1. 기본 양봉 및 상승률 조건 (2.5% 이상 상승)
             candle_body = close - open_p
             if candle_body <= 0:
                 continue
             if (close - prev['Close']) / prev['Close'] < 0.025:
                 continue
+                
+            # 2. 윗꼬리 제한 (몸통의 15% 이하로 마감하여 매물 소화가 잘 된 형태)
             if (high - close) > candle_body * 0.15:
                 continue
+                
+            # 3. 거래량 폭증 조건 (전일 대비 2.5배 또는 20일 평균 대비 2배 이상)
             if volume < prev['Volume'] * 2.5 or volume < avg_vol_20 * 2.0:
                 continue
                 
+            # 4. 이평선 정배열 조건 (5일선, 20일선 위)
             ma5 = df['Close'].rolling(5).mean().iloc[-1]
             ma20 = df['Close'].rolling(20).mean().iloc[-1]
             if close < ma5 or close < ma20:
                 continue
                 
-            stop_loss = round(close * 0.96, -1)
+            # 5. [신규 추가] 전고점 및 저항선 돌파/테스트 패턴 필터 (최근 20일 고점 대비 -3% 이내 밀집 또는 돌파)
             high_20 = df_20['High'].max()
+            if close < high_20 * 0.97:
+                continue  # 전고점/저항선 부근에 도달하지 못한 종목은 제외
+                
+            stop_loss = round(close * 0.96, -1)
             raw_target_1 = high_20 if high_20 > close * 1.02 else close * 1.04
             target_1 = round(raw_target_1, -1)
             target_2 = round(target_1 * 1.05, -1)
             
             chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
-            # 1. 종가매매 알림 (진입가, 손절가, 목표가 포함)
+            # 종가매매 알림 텍스트
             closing_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
@@ -148,7 +158,7 @@ def run_screener():
             )
             closing_signals.append(closing_msg)
             
-            # 2. 시초가매매 알림
+            # 시초가매매 알림 텍스트
             morning_msg = (
                 f"📌 <b>{name}</b> <code>({ticker})</code>\n"
                 f"💰 <b>기준가(오늘종가):</b> <code>{int(close):,}원</code>\n"
@@ -169,17 +179,16 @@ def run_screener():
             continue
 
     if closing_signals:
-        closing_text = "🚨 <b>[1] 오늘의 종가매매 (장 마감 전 진입)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
+        closing_text = "🚨 <b>[1] 오늘의 저항돌파 종가베팅 (장 마감 전 진입)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
         send_telegram(closing_text)
         
         morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals[:5])
         send_telegram(morning_text)
     else:
-        send_telegram("⚠️ 오늘 조건에 부합하는 종가/시초가 매매 종목이 없습니다.")
+        send_telegram("⚠️ 오늘 저항 돌파/고점 밀집 조건에 부합하는 종목이 없습니다.")
 
     save_positions(new_positions)
-    send_telegram("🏁 <b>[국장 자동화] 스크리닝 및 포지션 갱신 완료!</b>")
+    send_telegram("🏁 <b>[국장 자동화] 저항돌파 스크리닝 및 포지션 갱신 완료!</b>")
 
 if __name__ == "__main__":
     run_screener()
-
