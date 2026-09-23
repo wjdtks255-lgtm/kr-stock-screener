@@ -32,7 +32,6 @@ def save_positions(positions):
 def monitor_positions(start_date):
     positions = load_positions()
     if not positions:
-        print("현재 추적 중인 보유 포지션이 없습니다.")
         return
 
     updated_positions = {}
@@ -84,13 +83,13 @@ def run_screener():
     now = datetime.now()
     start_date = (now - timedelta(days=60)).strftime('%Y-%m-%d')
     
-    print("=== 보유 포지션 모니터링 수행 ===")
     monitor_positions(start_date)
 
-    print("=== [주도주 무제한 완화버전] 저항돌파 스크리닝 시작 ===")
+    print("=== [주도주 실전형 긴급완화버전] 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
-        top_300 = df_krx.sort_values(by='Amount', ascending=False).head(300)
+        # 상위 종목 풀을 400개로 늘려서 더 많은 후보 검토
+        top_400 = df_krx.sort_values(by='Amount', ascending=False).head(400)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
         return
@@ -99,13 +98,13 @@ def run_screener():
     morning_signals = []  
     new_positions = load_positions() 
 
-    for _, row in top_300.iterrows():
+    for _, row in top_400.iterrows():
         ticker = row['Code']
         name = row['Name']
         
         try:
             df = fdr.DataReader(ticker, start_date)
-            if len(df) < 30:
+            if len(df) < 20:
                 continue
             
             latest = df.iloc[-1]
@@ -118,44 +117,27 @@ def run_screener():
             volume = latest['Volume']
             amount = latest['Amount']
             
-            # 당일 거래대금 100억 이상
-            if amount < 100_0000_000:
+            # 1. 거래대금 기준 50억 원 이상으로 완화 (더 많은 대장주 후보 포착)
+            if amount < 5,0000_000:
                 continue
 
-            avg_vol_20 = df_30['Volume'].mean()
+            # 2. 양봉이면서 당일 1.5% 이상 상승하기만 하면 통과 (상승폭 문턱 낮춤)
+            if close <= open_p:
+                continue
+            if (close - prev['Close']) / prev['Close'] < 0.015:
+                continue
+                
+            # 3. 윗꼬리, 정배열, 거래량 폭증 같은 까다로운 칼트 필터 전면 제거 (수급과 양봉 흐름만 집중)
             
-            # 1. 기본 상승률 조건 (2.5% 이상 상승으로 살짝 완화)
-            candle_body = close - open_p
-            if candle_body <= 0:
-                continue
-            if (close - prev['Close']) / prev['Close'] < 0.025:
-                continue
-                
-            # 2. 윗꼬리 제한 완화 (고가 대비 -2.5% 이내 마감)
-            if high > close and (high - close) / high > 0.025:
-                continue
-                
-            # 3. 거래량 폭증 조건 완화 (전일 대비 1.5배 또는 20일 평균 대비 1.5배 이상)
-            if volume < prev['Volume'] * 1.5 and volume < avg_vol_20 * 1.5:
-                continue
-                
-            # 4. 이평선 정배열 (5일 > 20일 > 60일 우상향)
-            ma5 = df['Close'].rolling(5).mean().iloc[-1]
-            ma20 = df['Close'].rolling(20).mean().iloc[-1]
-            ma60 = df['Close'].rolling(60).mean().iloc[-1]
-            
-            if not (close > ma5 > ma20 > ma60):
-                continue
-                
-            # 5. 전고점/저항선 돌파 임박 조건 완화 (-6% 이내로 확장)
+            # 4. 전고점 밀집도 조건도 -10%까지 넉넉하게 확장
             high_30 = df_30['High'].max()
-            if close < high_30 * 0.94:
+            if close < high_30 * 0.90:
                 continue 
                 
-            stop_loss = round(close * 0.95, -1) # 손절폭도 살짝 여유있게 -5%로 조정
-            raw_target_1 = high_30 if high_30 > close * 1.02 else close * 1.04
+            stop_loss = round(close * 0.94, -1) # 손절 -6%
+            raw_target_1 = high_30 if high_30 > close * 1.02 else close * 1.03
             target_1 = round(raw_target_1, -1)
-            target_2 = round(target_1 * 1.06, -1)
+            target_2 = round(target_1 * 1.05, -1)
             
             chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
             
@@ -190,17 +172,16 @@ def run_screener():
             continue
 
     if closing_signals:
-        closing_text = "🚨 <b>[1] 주도주 완화버전 저항돌파 종가베팅</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
+        closing_text = "🚨 <b>[1] 주도주 실전형 저항돌파 종가베팅</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
         send_telegram(closing_text)
         
         morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals[:5])
         send_telegram(morning_text)
     else:
-        send_telegram("⚠️ 오늘 완화된 조건에 부합하는 주도주가 없습니다.")
+        send_telegram("⚠️ 오늘 완화된 조건에도 부합하는 종목이 없습니다.")
 
     save_positions(new_positions)
     send_telegram("🏁 <b>[국장 자동화] 스크리닝 완료!</b>")
 
 if __name__ == "__main__":
     run_screener()
-
