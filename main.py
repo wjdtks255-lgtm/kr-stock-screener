@@ -88,7 +88,6 @@ def run_screener():
     print("=== [주도주 실전형 긴급완화버전] 스크리닝 시작 ===")
     try:
         df_krx = fdr.StockListing('KRX')
-        # 상위 종목 풀을 400개로 늘려서 더 많은 후보 검토
         top_400 = df_krx.sort_values(by='Amount', ascending=False).head(400)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
@@ -117,24 +116,20 @@ def run_screener():
             volume = latest['Volume']
             amount = latest['Amount']
             
-            # 1. 거래대금 기준 50억 원 이상으로 완화 (더 많은 대장주 후보 포착)
-            if amount < 5,0000_000:
+            # 거래대금 기준 5천만 원 이상 (오타 수정완료)
+            if amount < 50_000_000:
                 continue
 
-            # 2. 양봉이면서 당일 1.5% 이상 상승하기만 하면 통과 (상승폭 문턱 낮춤)
             if close <= open_p:
                 continue
             if (close - prev['Close']) / prev['Close'] < 0.015:
                 continue
                 
-            # 3. 윗꼬리, 정배열, 거래량 폭증 같은 까다로운 칼트 필터 전면 제거 (수급과 양봉 흐름만 집중)
-            
-            # 4. 전고점 밀집도 조건도 -10%까지 넉넉하게 확장
             high_30 = df_30['High'].max()
             if close < high_30 * 0.90:
                 continue 
                 
-            stop_loss = round(close * 0.94, -1) # 손절 -6%
+            stop_loss = round(close * 0.94, -1)
             raw_target_1 = high_30 if high_30 > close * 1.02 else close * 1.03
             target_1 = round(raw_target_1, -1)
             target_2 = round(target_1 * 1.05, -1)
