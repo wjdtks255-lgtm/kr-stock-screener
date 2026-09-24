@@ -85,95 +85,114 @@ def run_screener():
     
     monitor_positions(start_date)
 
-    print("=== [주도주 실전형 긴급완화버전] 스크리닝 시작 ===")
+    print("=== [주도주 실전형 직관적 스크리닝 시작] ===")
     try:
         df_krx = fdr.StockListing('KRX')
-        top_400 = df_krx.sort_values(by='Amount', ascending=False).head(400)
+        # 거래대금 기준 상위 500개 종목을 대상으로 검토
+        top_500 = df_krx.sort_values(by='Amount', ascending=False).head(500)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
         return
 
-    closing_signals = []  
-    morning_signals = []  
-    new_positions = load_positions() 
+    candidates = []
 
-    for _, row in top_400.iterrows():
+    for _, row in top_500.iterrows():
         ticker = row['Code']
         name = row['Name']
         
         try:
             df = fdr.DataReader(ticker, start_date)
-            if len(df) < 20:
+            if len(df) < 15:
                 continue
             
             latest = df.iloc[-1]
-            prev = df.iloc[-2]
-            df_30 = df.iloc[-30:]
-            
-            close = latest['Close'] 
+            close = latest['Close']
             open_p = latest['Open']
             high = latest['High']
-            volume = latest['Volume']
             amount = latest['Amount']
             
-            # 거래대금 기준 5천만 원 이상 (오타 수정완료)
-            if amount < 50_000_000:
+            # 1. 최소 거래대금 30억 원 이상 (시장 관심 종목)
+            if amount < 3_000_000_000:
                 continue
-
+                
+            # 2. 오늘 시가 대비 종가가 상승한 양봉 마감
             if close <= open_p:
                 continue
-            if (close - prev['Close']) / prev['Close'] < 0.015:
+                
+            # 3. 당일 상승률이 1% 이상인 종목들만 수집
+            prev_close = df.iloc[-2]['Close']
+            change_rate = (close - prev_close) / prev_close
+            if change_rate < 0.01:
                 continue
                 
-            high_30 = df_30['High'].max()
-            if close < high_30 * 0.90:
-                continue 
-                
-            stop_loss = round(close * 0.94, -1)
-            raw_target_1 = high_30 if high_30 > close * 1.02 else close * 1.03
-            target_1 = round(raw_target_1, -1)
-            target_2 = round(target_1 * 1.05, -1)
-            
-            chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
-            
-            closing_msg = (
-                f"📌 <b>{name}</b> <code>({ticker})</code>\n"
-                f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
-                f"🛡️ <b>손절가(SL):</b> <code>{int(stop_loss):,}원</code>\n"
-                f"🎯 <b>1차 목표가(TP1):</b> <code>{int(target_1):,}원</code>\n"
-                f"🎯 <b>2차 목표가(TP2):</b> <code>{int(target_2):,}원</code>\n"
-                f"📈 <a href='{chart_link}'>네이버 차트</a>"
-            )
-            closing_signals.append(closing_msg)
-            
-            morning_msg = (
-                f"📌 <b>{name}</b> <code>({ticker})</code>\n"
-                f"💰 <b>기준가(오늘종가):</b> <code>{int(close):,}원</code>\n"
-                f"🎯 <b>1차 목표가(TP1):</b> <code>{int(target_1):,}원</code>\n"
-                f"🎯 <b>2차 목표가(TP2):</b> <code>{int(target_2):,}원</code>\n"
-                f"💡 <i>내일 아침 시초가 갭 공략</i>"
-            )
-            morning_signals.append(morning_msg)
-            
-            new_positions[ticker] = {
-                "name": name,
-                "target_1": int(target_1),
-                "target_2": int(target_2),
-                "stop_loss": int(stop_loss),
-                "tp1_hit": False,
-                "status": "ACTIVE"
-            }
+            # 점수 부여: 거래대금 크고 상승률 높을수록 우선순위
+            score = amount * change_rate
+            candidates.append({
+                'ticker': ticker,
+                'name': name,
+                'close': close,
+                'high': high,
+                'score': score
+            })
         except Exception:
             continue
 
+    # 점수(거래대금 * 상승률) 기준 상위 3개 종목을 무조건 선정
+    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
+    top_picks = candidates[:3]
+
+    closing_signals = []  
+    morning_signals = []  
+    new_positions = load_positions() 
+
+    for item in top_picks:
+        ticker = item['ticker']
+        name = item['name']
+        close = item['close']
+        high = item['high']
+        
+        stop_loss = round(close * 0.95, -1) # 손절가 -5%
+        target_1 = round(close * 1.03, -1)  # 1차 목표가 +3%
+        target_2 = round(close * 1.06, -1)  # 2차 목표가 +6%
+        
+        chart_link = f"https://finance.naver.com/item/main.naver?code={ticker}"
+        
+        closing_msg = (
+            f"📌 <b>{name}</b> <code>({ticker})</code>\n"
+            f"💰 <b>진입가(종가):</b> <code>{int(close):,}원</code>\n"
+            f"🛡️ <b>손절가(SL):</b> <code>{int(stop_loss):,}원</code>\n"
+            f"🎯 <b>1차 목표가(TP1):</b> <code>{int(target_1):,}원</code>\n"
+            f"🎯 <b>2차 목표가(TP2):</b> <code>{int(target_2):,}원</code>\n"
+            f"📈 <a href='{chart_link}'>네이버 차트</a>"
+        )
+        closing_signals.append(closing_msg)
+        
+        morning_msg = (
+            f"📌 <b>{name}</b> <code>({ticker})</code>\n"
+            f"💰 <b>기준가(오늘종가):</b> <code>{int(close):,}원</code>\n"
+            f"🎯 <b>1차 목표가(TP1):</b> <code>{int(target_1):,}원</code>\n"
+            f"🎯 <b>2차 목표가(TP2):</b> <code>{int(target_2):,}원</code>\n"
+            f"💡 <i>내일 아침 시초가 갭 공략</i>"
+        )
+        morning_signals.append(morning_msg)
+        
+        new_positions[ticker] = {
+            "name": name,
+            "target_1": int(target_1),
+            "target_2": int(target_2),
+            "stop_loss": int(stop_loss),
+            "tp1_hit": False,
+            "status": "ACTIVE"
+        }
+
     if closing_signals:
-        closing_text = "🚨 <b>[1] 주도주 실전형 저항돌파 종가베팅</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals[:5])
+        closing_text = "🚨 <b>[1] 실전 주도주 종가베팅 포착</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals)
         send_telegram(closing_text)
         
-        morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals[:5])
+        morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals)
         send_telegram(morning_text)
     else:
-        send_telegram("⚠️ 오늘 완화된 조건에도 부합하는 종목이 없습니다.")
+        send_telegram("⚠️ 오늘 조건에 부합하는 종목이 없습니다.")
 
     save_positions(new_positions)
     send_telegram("🏁 <b>[국장 자동화] 스크리닝 완료!</b>")
