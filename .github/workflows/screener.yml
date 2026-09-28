@@ -1,38 +1,289 @@
-name: Stock Auto Trading Bot
+name: Korea Stock Rise Hunter Bot
 
 on:
-  schedule:
-    # UTC 기준 오전 6시 0분 = 한국 시간 평일 오후 3시 0분 실행 (연산 시간 고려하여 15~20분경 전송)
-    - cron: '0 6 * * 1-5'
 
   workflow_dispatch:
 
+    inputs:
+
+      mode:
+
+        description: "close or morning"
+
+        required: true
+
+        default: "close"
+
+        type: choice
+
+        options:
+
+          - close
+
+          - morning
+
+
+  schedule:
+
+    # ============================================
+    # 장초 상승 종목
+    # 한국시간
+    # 09:05
+    # 09:10
+    # 09:15
+    # 09:20
+    # 09:25
+    # 09:30
+    # ============================================
+
+    - cron: "5,10,15,20,25,30 9 * * 1-5"
+
+      timezone: "Asia/Seoul"
+
+
+    # ============================================
+    # 종가 매수 후보
+    #
+    # 15:10에 최종 스크리닝
+    # 15:30 장 마감 전에 매수 가능
+    # ============================================
+
+    - cron: "10 15 * * 1-5"
+
+      timezone: "Asia/Seoul"
+
+
 permissions:
+
   contents: write
 
+
 jobs:
-  run-bot:
+
+
+  # ==================================================
+  # MORNING
+  # ==================================================
+
+  morning:
+
+    if: >
+
+      github.event_name == 'schedule' &&
+
+      github.event.schedule ==
+      '5,10,15,20,25,30 9 * * 1-5'
+
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+
     steps:
-      - name: Checkout repository
+
+
+      - name: Checkout
+
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
 
-      - name: Install dependencies and Run Bot
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+      - name: Setup Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.11"
+
+
+      - name: Install dependencies
+
         run: |
+
           python -m pip install --upgrade pip
-          pip install finance-datareader pandas requests
+
+          pip install requests pandas
+
+
+      - name: Run morning scanner
+
+        env:
+
+          MODE: morning
+
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+
+          KIS_ENV: real
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
+        run: |
+
           python main.py
 
-      - name: Commit and push updated active positions
+
+      - name: Save bot state
+
         uses: stefanzweifel/git-auto-commit-action@v5
+
         with:
-          commit_message: "Auto update active_positions.json"
-          file_patterns: active_positions.json
+
+          commit_message: "Update morning bot state"
+
+          file_pattern: "bot_state.json bot_log.json"
+
+
+
+  # ==================================================
+  # CLOSE
+  # ==================================================
+
+  close:
+
+    if: >
+
+      github.event_name == 'schedule' &&
+
+      github.event.schedule ==
+      '10 15 * * 1-5'
+
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+
+    steps:
+
+
+      - name: Checkout
+
+        uses: actions/checkout@v4
+
+
+      - name: Setup Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.11"
+
+
+      - name: Install dependencies
+
+        run: |
+
+          python -m pip install --upgrade pip
+
+          pip install requests pandas
+
+
+      - name: Run 15:10 close scanner
+
+        env:
+
+          MODE: close
+
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+
+          KIS_ENV: real
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
+        run: |
+
+          python main.py
+
+
+      - name: Save close bot state
+
+        uses: stefanzweifel/git-auto-commit-action@v5
+
+        with:
+
+          commit_message: "Update close bot state"
+
+          file_pattern: "bot_state.json bot_log.json"
+
+
+
+  # ==================================================
+  # MANUAL TEST
+  # ==================================================
+
+  manual:
+
+    if: github.event_name == 'workflow_dispatch'
+
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+
+    steps:
+
+
+      - name: Checkout
+
+        uses: actions/checkout@v4
+
+
+      - name: Setup Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.11"
+
+
+      - name: Install dependencies
+
+        run: |
+
+          python -m pip install --upgrade pip
+
+          pip install requests pandas
+
+
+      - name: Run manual scanner
+
+        env:
+
+          MODE: ${{ inputs.mode }}
+
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+
+          KIS_ENV: real
+
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
+        run: |
+
+          python main.py
+
+
+      - name: Save manual state
+
+        uses: stefanzweifel/git-auto-commit-action@v5
+
+        with:
+
+          commit_message: "Update manual bot state"
+
+          file_pattern: "bot_state.json bot_log.json"
