@@ -85,10 +85,10 @@ def run_screener():
     
     monitor_positions(start_date)
 
-    print("=== [주도주 실전형 직관적 스크리닝 시작] ===")
+    print("=== [주도주 절대 거래대금 탑픽 스크리닝 시작] ===")
     try:
         df_krx = fdr.StockListing('KRX')
-        # 거래대금 기준 상위 500개 종목을 대상으로 검토
+        # 거래대금 상위 500개 중 최소 10억 이상인 종목 대상
         top_500 = df_krx.sort_values(by='Amount', ascending=False).head(500)
     except Exception as e:
         print(f"KRX 종목 리스트 불러오기 실패: {e}")
@@ -102,43 +102,28 @@ def run_screener():
         
         try:
             df = fdr.DataReader(ticker, start_date)
-            if len(df) < 15:
+            if len(df) < 10:
                 continue
             
             latest = df.iloc[-1]
             close = latest['Close']
-            open_p = latest['Open']
-            high = latest['High']
             amount = latest['Amount']
             
-            # 1. 최소 거래대금 30억 원 이상 (시장 관심 종목)
-            if amount < 3_000_000_000:
+            # 최소 거래대금 10억 원 이상만 필터링
+            if amount < 1_000_000_000:
                 continue
                 
-            # 2. 오늘 시가 대비 종가가 상승한 양봉 마감
-            if close <= open_p:
-                continue
-                
-            # 3. 당일 상승률이 1% 이상인 종목들만 수집
-            prev_close = df.iloc[-2]['Close']
-            change_rate = (close - prev_close) / prev_close
-            if change_rate < 0.01:
-                continue
-                
-            # 점수 부여: 거래대금 크고 상승률 높을수록 우선순위
-            score = amount * change_rate
             candidates.append({
                 'ticker': ticker,
                 'name': name,
                 'close': close,
-                'high': high,
-                'score': score
+                'amount': amount
             })
         except Exception:
             continue
 
-    # 점수(거래대금 * 상승률) 기준 상위 3개 종목을 무조건 선정
-    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
+    # 조건 따지지 않고 오직 '거래대금(Amount)'이 가장 큰 상위 3개 종목을 무조건 선정
+    candidates = sorted(candidates, key=lambda x: x['amount'], reverse=True)
     top_picks = candidates[:3]
 
     closing_signals = []  
@@ -149,7 +134,6 @@ def run_screener():
         ticker = item['ticker']
         name = item['name']
         close = item['close']
-        high = item['high']
         
         stop_loss = round(close * 0.95, -1) # 손절가 -5%
         target_1 = round(close * 1.03, -1)  # 1차 목표가 +3%
@@ -186,13 +170,11 @@ def run_screener():
         }
 
     if closing_signals:
-        closing_text = "🚨 <b>[1] 실전 주도주 종가베팅 포착</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals)
+        closing_text = "🚨 <b>[1] 오늘의 거래대금 최상위 주도주 (종가베팅)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(closing_signals)
         send_telegram(closing_text)
         
         morning_text = "🌅 <b>[2] 내일 아침 시초가 매매 (오전 갭 공략)</b>\n━━━━━━━━━━━━━━━━━━━\n\n" + "\n\n".join(morning_signals)
         send_telegram(morning_text)
-    else:
-        send_telegram("⚠️ 오늘 조건에 부합하는 종목이 없습니다.")
 
     save_positions(new_positions)
     send_telegram("🏁 <b>[국장 자동화] 스크리닝 완료!</b>")
