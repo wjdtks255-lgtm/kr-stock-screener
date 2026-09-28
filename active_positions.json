@@ -4,13 +4,15 @@
         "target_1": 13880,
         "target_2": 14574,
         "stop_loss": 12864,
-        "tp1_hit": true
+        "tp1_hit": true,
+        "status": "STOP"
     },
     "089890": {
         "name": "코세스",
         "target_1": 29120,
         "target_2": 30576,
         "stop_loss": 26880,
-        "tp1_hit": true
+        "tp1_hit": true,
+        "status": "TP2"
     }
 }
