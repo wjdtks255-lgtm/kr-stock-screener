@@ -1,0 +1,116 @@
+name: Korea Stock Rise Hunter
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Manual run mode"
+        required: true
+        default: "monitor"
+        type: choice
+        options:
+          - morning
+          - close
+          - monitor
+
+      force_scan:
+        description: "Force scan even if already scanned today"
+        required: true
+        default: false
+        type: boolean
+
+  schedule:
+    # ==========================================
+    # 장초 상승 후보
+    # 한국시간 09:05 ~ 09:30
+    # ==========================================
+    - cron: "5,10,15,20,25,30 9 * * 1-5"
+      timezone: "Asia/Seoul"
+
+    # ==========================================
+    # 종가 상승 후보
+    # 한국시간 15:00 ~ 15:20
+    # ==========================================
+    - cron: "0,5,10,15,20 15 * * 1-5"
+      timezone: "Asia/Seoul"
+
+    # ==========================================
+    # 보유 종목 TP / SL 감시
+    # 09:35 ~ 09:55
+    # ==========================================
+    - cron: "35,40,45,50,55 9 * * 1-5"
+      timezone: "Asia/Seoul"
+
+    # ==========================================
+    # 보유 종목 TP / SL 감시
+    # 10:00 ~ 14:55
+    # ==========================================
+    - cron: "0,5,10,15,20,25,30,35,40,45,50,55 10,11,12,13,14 * * 1-5"
+      timezone: "Asia/Seoul"
+
+
+permissions:
+  contents: write
+
+
+jobs:
+
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ==========================================
+      # 1. GitHub 저장소 가져오기
+      # ==========================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ==========================================
+      # 2. Python 설치
+      # ==========================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      # ==========================================
+      # 3. 필요한 Python 패키지 설치
+      # ==========================================
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas lxml
+
+
+      # ==========================================
+      # 4. 주식 상승헌터 실행
+      # ==========================================
+      - name: Run stock hunter
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
+          # 수동 실행 시 선택한 모드
+          MODE: ${{ github.event.inputs.mode }}
+
+          # 수동 강제 검색 여부
+          FORCE_SCAN: ${{ github.event.inputs.force_scan }}
+
+        run: |
+          python main.py
+
+
+      # ==========================================
+      # 5. bot_state.json 저장
+      #
+      # 중요:
+      # bot_log.json은 사용하지 않습니다.
+      # ==========================================
+      - name: Commit bot state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update stock bot state"
+          file_pattern: bot_state.json
