@@ -1,160 +1,308 @@
 # -*- coding: utf-8 -*-
-"""
-Korea Stock Rise Hunter - No KIS Account Authentication
-Data source: Naver Finance public read-only endpoints.
-Telegram: TELEGRAM_TOKEN + CHAT_ID only.
 
-This bot:
-1) Finds Korean stock candidates for morning and pre-close sessions.
-2) Sends Telegram alerts with entry/SL/TP1/TP2.
-3) Stores active positions in active_positions.json.
-4) Checks active positions every scheduled run and sends TP1/TP2/SL alerts.
-5) Does NOT place real orders.
+"""
+Korea Stock Hunter V2
+
+목적
+1. 09:00~09:30 장초 상승 후보 탐색
+2. 15:10~15:20 종가 매수 후보 탐색
+3. Telegram 알림
+4. ENTRY / SL / TP1 / TP2 계산
+5. 장초 반복 검색
+6. 종가 반복 검색
+7. 동일 종목 중복 알림 방지
+8. 후보가 없더라도 다음 스캔을 계속 수행
+9. bot_state.json에 상태 저장
+
+주의
+- 실제 주문을 하지 않습니다.
+- 투자 수익을 보장하지 않습니다.
+- Naver 공개 데이터를 기반으로 하는 후보 탐색 시스템입니다.
 """
 
 import os
 import json
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
 
 import requests
 
+
+# =========================================================
+# 기본 설정
+# =========================================================
+
 BASE = "https://m.stock.naver.com"
 POLLING = "https://polling.finance.naver.com/api/realtime/domestic/stock"
+
 STATE_FILE = "bot_state.json"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-    "Referer": "https://m.stock.naver.com/",
-}
-
 TIMEOUT = 10
-MAX_CANDIDATES = 80
+
 MIN_PRICE = 1000
-MIN_TURNOVER = 300_000_000  # 3억원
+MIN_TURNOVER = 300_000_000
+
+MAX_CANDIDATES = 100
 MAX_RESULTS = 5
 
-session = requests.Session()
-session.headers.update(HEADERS)
+MORNING_THRESHOLD = 68
+CLOSE_THRESHOLD = 68
 
+session = requests.Session()
+
+session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/126.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://m.stock.naver.com/",
+})
+
+
+# =========================================================
+# 시간
+# =========================================================
 
 def now_kst():
-    return datetime.now(timezone(timedelta(hours=9)))
+    return datetime.now(
+        timezone(timedelta(hours=9))
+    )
 
 
 def today_key():
     return now_kst().strftime("%Y-%m-%d")
 
 
+# =========================================================
+# Telegram
+# =========================================================
+
 def send_telegram(text):
+
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("ERROR: TELEGRAM_TOKEN 또는 CHAT_ID가 없습니다.")
+        print("ERROR: TELEGRAM_TOKEN 또는 CHAT_ID 없음")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
+
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+
     try:
-        r = session.post(url, data=payload, timeout=15)
-        r.raise_for_status()
+
+        response = session.post(
+            url,
+            data=payload,
+            timeout=15,
+        )
+
+        response.raise_for_status()
+
         return True
+
     except Exception as e:
+
         print(f"Telegram error: {e}")
+
         return False
 
 
+# =========================================================
+# HTTP
+# =========================================================
+
 def get_json(url, params=None):
+
     try:
-        r = session.get(url, params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
+
+        response = session.get(
+            url,
+            params=params,
+            timeout=TIMEOUT,
+        )
+
+        response.raise_for_status()
+
+        return response.json()
+
     except Exception as e:
-        print(f"GET 실패: {url} / {e}")
+
+        print(
+            f"GET 실패: {url} "
+            f"/ {e}"
+        )
+
         return None
 
 
-def num(v):
-    if v is None:
+# =========================================================
+# 숫자 변환
+# =========================================================
+
+def num(value):
+
+    if value is None:
         return 0.0
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip().replace(",", "").replace("%", "")
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = (
+        str(value)
+        .strip()
+        .replace(",", "")
+        .replace("%", "")
+    )
+
     try:
-        return float(s)
+        return float(text)
+
     except Exception:
         return 0.0
 
 
-def money_korean(v):
-    """'5조 7,942억' / '3,200억' / '12억' -> won."""
-    if v is None:
+def money_korean(value):
+
+    if value is None:
         return 0
-    if isinstance(v, (int, float)):
-        return int(v)
-    s = str(v).replace(",", "").strip()
-    if not s:
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = (
+        str(value)
+        .replace(",", "")
+        .strip()
+    )
+
+    if not text:
         return 0
+
     total = 0
+
     try:
-        if "조" in s:
-            a, rest = s.split("조", 1)
-            total += int(float(a.strip())) * 1_000_000_000_000
-            s = rest
-        if "억" in s:
-            a, rest = s.split("억", 1)
-            total += int(float(a.strip())) * 100_000_000
-            s = rest
-        if "만" in s:
-            a, rest = s.split("만", 1)
-            total += int(float(a.strip())) * 10_000
-            s = rest
+
+        if "조" in text:
+
+            a, text = text.split(
+                "조",
+                1
+            )
+
+            total += (
+                int(float(a.strip()))
+                * 1_000_000_000_000
+            )
+
+        if "억" in text:
+
+            a, text = text.split(
+                "억",
+                1
+            )
+
+            total += (
+                int(float(a.strip()))
+                * 100_000_000
+            )
+
+        if "만" in text:
+
+            a, text = text.split(
+                "만",
+                1
+            )
+
+            total += (
+                int(float(a.strip()))
+                * 10_000
+            )
+
         if total == 0:
-            return int(float(s))
+
+            return int(float(text))
+
         return total
+
     except Exception:
+
         return 0
 
+
+# =========================================================
+# JSON에서 종목 데이터 찾기
+# =========================================================
 
 def recursive_stock_items(obj):
-    """Find dictionaries containing a stock code/name anywhere in a JSON payload."""
+
     found = []
+
     seen = set()
 
     def walk(x):
+
         if isinstance(x, dict):
+
             code = (
                 x.get("itemCode")
                 or x.get("code")
                 or x.get("symbolCode")
                 or x.get("stockCode")
             )
-            name = x.get("name") or x.get("stockName") or x.get("itemName")
-            if code and name and str(code).isdigit() and len(str(code)) == 6:
+
+            name = (
+                x.get("name")
+                or x.get("stockName")
+                or x.get("itemName")
+            )
+
+            if (
+                code
+                and name
+                and str(code).isdigit()
+                and len(str(code)) == 6
+            ):
+
                 key = str(code)
+
                 if key not in seen:
+
                     seen.add(key)
+
                     found.append(x)
-            for v in x.values():
-                walk(v)
+
+            for value in x.values():
+                walk(value)
+
         elif isinstance(x, list):
-            for v in x:
-                walk(v)
+
+            for value in x:
+                walk(value)
 
     walk(obj)
+
     return found
 
 
+# =========================================================
+# Ranking 데이터 정규화
+# =========================================================
+
 def normalize_rank_item(x):
+
     code = str(
         x.get("itemCode")
         or x.get("code")
@@ -163,7 +311,12 @@ def normalize_rank_item(x):
         or ""
     ).zfill(6)
 
-    name = x.get("name") or x.get("stockName") or x.get("itemName") or code
+    name = (
+        x.get("name")
+        or x.get("stockName")
+        or x.get("itemName")
+        or code
+    )
 
     price = num(
         x.get("currentPrice")
@@ -171,18 +324,21 @@ def normalize_rank_item(x):
         or x.get("tradePrice")
         or x.get("price")
     )
+
     change_pct = num(
         x.get("fluctuationsRatio")
         or x.get("changeRate")
         or x.get("changeRateValue")
         or x.get("changePercent")
     )
+
     volume = num(
         x.get("accumulatedTradingVolume")
         or x.get("tradingVolume")
         or x.get("volume")
         or x.get("quant")
     )
+
     turnover = money_korean(
         x.get("accumulatedTradingValue")
         or x.get("tradingValue")
@@ -199,581 +355,1791 @@ def normalize_rank_item(x):
     }
 
 
-def get_rankings(sort_type, category, pages=2, page_size=100):
-    """Naver mobile ranking endpoint. Falls back to PC HTML if needed."""
+# =========================================================
+# 네이버 순위 데이터
+# =========================================================
+
+def get_rankings(
+    sort_type,
+    category,
+    pages=2,
+    page_size=100,
+):
+
     result = []
 
     for page in range(1, pages + 1):
-        url = f"{BASE}/front-api/stock/domestic/stockList"
+
+        url = (
+            f"{BASE}/front-api/"
+            f"stock/domestic/stockList"
+        )
+
         params = {
             "sortType": sort_type,
             "category": category,
             "page": page,
             "pageSize": page_size,
         }
-        data = get_json(url, params)
+
+        data = get_json(
+            url,
+            params,
+        )
+
         if data:
+
             items = recursive_stock_items(data)
-            for x in items:
-                result.append(normalize_rank_item(x))
+
+            for item in items:
+
+                normalized = normalize_rank_item(item)
+
+                if normalized["code"].isdigit():
+
+                    result.append(normalized)
+
         time.sleep(0.15)
 
-    # Fallback: public PC ranking pages
-    if not result:
-        import pandas as pd
+    unique = {}
 
-        pc_map = {
-            "quantTop": "https://finance.naver.com/sise/sise_quant.naver",
-            "up": "https://finance.naver.com/sise/sise_rise.naver",
-        }
-        url = pc_map.get(sort_type)
-        if url:
-            for sosok in (0, 1):
-                try:
-                    html = session.get(
-                        url,
-                        params={"sosok": sosok, "page": 1},
-                        timeout=TIMEOUT,
-                    ).content
-                    tables = pd.read_html(html)
-                    for table in tables:
-                        for _, row in table.iterrows():
-                            code = str(row.iloc[1]).strip() if len(row) > 1 else ""
-                            if code.isdigit() and len(code) == 6:
-                                result.append({
-                                    "code": code,
-                                    "name": str(row.iloc[0]),
-                                    "price": num(row.iloc[2]) if len(row) > 2 else 0,
-                                    "change_pct": 0,
-                                    "volume": 0,
-                                    "turnover": 0,
-                                })
-                except Exception as e:
-                    print(f"PC ranking fallback error: {e}")
+    for item in result:
 
-    # unique
-    out = {}
-    for x in result:
-        if x["code"].isdigit() and len(x["code"]) == 6:
-            out[x["code"]] = x
-    return list(out.values())
+        code = item["code"]
 
+        if (
+            code.isdigit()
+            and len(code) == 6
+        ):
+
+            unique[code] = item
+
+    return list(unique.values())
+
+
+# =========================================================
+# 실시간 가격
+# =========================================================
 
 def get_realtime(code):
-    data = get_json(f"{POLLING}/{code}")
-    if not data or not data.get("datas"):
+
+    data = get_json(
+        f"{POLLING}/{code}"
+    )
+
+    if not data:
         return None
-    d = data["datas"][0]
+
+    datas = data.get("datas")
+
+    if not datas:
+        return None
+
+    d = datas[0]
 
     return {
         "code": code,
-        "name": d.get("stockName") or code,
-        "price": num(d.get("closePriceRaw") or d.get("closePrice")),
+
+        "name": (
+            d.get("stockName")
+            or code
+        ),
+
+        "price": num(
+            d.get("closePriceRaw")
+            or d.get("closePrice")
+        ),
+
         "change": num(
             d.get("compareToPreviousClosePriceRaw")
             or d.get("compareToPreviousClosePrice")
         ),
+
         "change_pct": num(
-            d.get("fluctuationsRatioRaw") or d.get("fluctuationsRatio")
+            d.get("fluctuationsRatioRaw")
+            or d.get("fluctuationsRatio")
         ),
-        "open": num(d.get("openPriceRaw") or d.get("openPrice")),
-        "high": num(d.get("highPriceRaw") or d.get("highPrice")),
-        "low": num(d.get("lowPriceRaw") or d.get("lowPrice")),
+
+        "open": num(
+            d.get("openPriceRaw")
+            or d.get("openPrice")
+        ),
+
+        "high": num(
+            d.get("highPriceRaw")
+            or d.get("highPrice")
+        ),
+
+        "low": num(
+            d.get("lowPriceRaw")
+            or d.get("lowPrice")
+        ),
+
         "volume": num(
             d.get("accumulatedTradingVolumeRaw")
             or d.get("accumulatedTradingVolume")
         ),
+
         "turnover": money_korean(
             d.get("accumulatedTradingValueRaw")
             or d.get("accumulatedTradingValue")
         ),
-        "market_status": d.get("marketStatus", ""),
-        "trade_time": d.get("localTradedAt", ""),
+
+        "market_status": d.get(
+            "marketStatus",
+            ""
+        ),
+
+        "trade_time": d.get(
+            "localTradedAt",
+            ""
+        ),
     }
 
 
-def get_history(code, page_size=35):
-    url = f"{BASE}/api/stock/{code}/price"
-    data = get_json(url, {"pageSize": page_size, "page": 1})
+# =========================================================
+# 일봉
+# =========================================================
+
+def get_history(
+    code,
+    page_size=60,
+):
+
+    url = (
+        f"{BASE}/api/stock/"
+        f"{code}/price"
+    )
+
+    data = get_json(
+        url,
+        {
+            "pageSize": page_size,
+            "page": 1,
+        },
+    )
+
     if not data:
         return []
 
-    # Usually data is a list, but handle nested shapes.
     rows = []
-    if isinstance(data, list):
-        rows = data
-    elif isinstance(data, dict):
-        for key in ("price", "prices", "rows", "result", "data"):
-            if isinstance(data.get(key), list):
-                rows = data[key]
-                break
-        if not rows:
-            # search recursively for date-like rows
-            def walk(x):
-                if isinstance(x, list):
-                    for y in x:
-                        if isinstance(y, dict) and (
-                            y.get("localTradedAt") or y.get("date")
-                        ):
-                            rows.append(y)
-                        else:
-                            walk(y)
-                elif isinstance(x, dict):
-                    for y in x.values():
-                        walk(y)
-            walk(data)
 
-    out = []
-    for r in rows:
-        if not isinstance(r, dict):
+    if isinstance(data, list):
+
+        rows = data
+
+    elif isinstance(data, dict):
+
+        for key in (
+            "price",
+            "prices",
+            "rows",
+            "result",
+            "data",
+        ):
+
+            if isinstance(
+                data.get(key),
+                list
+            ):
+
+                rows = data[key]
+
+                break
+
+    result = []
+
+    for row in rows:
+
+        if not isinstance(row, dict):
             continue
-        date = r.get("localTradedAt") or r.get("date") or r.get("localDate")
-        close = num(r.get("closePrice") or r.get("close"))
-        high = num(r.get("highPrice") or r.get("high"))
-        low = num(r.get("lowPrice") or r.get("low"))
-        open_ = num(r.get("openPrice") or r.get("open"))
-        vol = num(r.get("accumulatedTradingVolume") or r.get("volume"))
+
+        date = (
+            row.get("localTradedAt")
+            or row.get("date")
+            or row.get("localDate")
+        )
+
+        close = num(
+            row.get("closePrice")
+            or row.get("close")
+        )
+
+        high = num(
+            row.get("highPrice")
+            or row.get("high")
+        )
+
+        low = num(
+            row.get("lowPrice")
+            or row.get("low")
+        )
+
+        open_price = num(
+            row.get("openPrice")
+            or row.get("open")
+        )
+
+        volume = num(
+            row.get(
+                "accumulatedTradingVolume"
+            )
+            or row.get("volume")
+        )
+
         if date and close > 0:
-            out.append({
+
+            result.append({
                 "date": str(date)[:10],
-                "open": open_,
+                "open": open_price,
                 "high": high,
                 "low": low,
                 "close": close,
-                "volume": vol,
+                "volume": volume,
             })
-    return out
 
+    return result
+
+
+# =========================================================
+# 상태
+# =========================================================
+
+def default_state():
+
+    return {
+        "positions": {},
+        "sent_signals": {},
+        "morning_seen": {},
+        "close_seen": {},
+        "snapshots": {},
+        "last_run": "",
+    }
+
+
+def load_state():
+
+    if not os.path.exists(
+        STATE_FILE
+    ):
+
+        return default_state()
+
+    try:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
+            state = json.load(f)
+
+        default = default_state()
+
+        for key, value in default.items():
+
+            state.setdefault(
+                key,
+                value
+            )
+
+        return state
+
+    except Exception:
+
+        return default_state()
+
+
+def save_state(state):
+
+    temp = STATE_FILE + ".tmp"
+
+    with open(
+        temp,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            state,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    os.replace(
+        temp,
+        STATE_FILE
+    )
+
+
+# =========================================================
+# 수익률
+# =========================================================
 
 def pct(a, b):
+
     if not b:
         return 0.0
-    return (a / b - 1.0) * 100.0
+
+    return (
+        (a / b) - 1
+    ) * 100
 
 
-def calc_score(rt, hist, mode):
-    if not rt or rt["price"] <= 0:
-        return 0, {}
+# =========================================================
+# ATR 비슷한 일봉 변동성 계산
+# =========================================================
 
-    p = rt["price"]
-    chg = rt["change_pct"]
-    turnover = rt["turnover"]
-    high = rt["high"]
-    low = rt["low"]
+def average_range(hist):
 
     if len(hist) < 6:
+        return 0
+
+    ranges = []
+
+    for row in hist[:20]:
+
+        high = row["high"]
+        low = row["low"]
+
+        if high > 0 and low > 0:
+
+            ranges.append(
+                high - low
+            )
+
+    if not ranges:
+        return 0
+
+    return sum(ranges) / len(ranges)
+
+
+# =========================================================
+# ENTRY / SL / TP
+# =========================================================
+
+def make_levels(
+    price,
+    hist,
+):
+
+    if price <= 0:
+
+        return (
+            0,
+            0,
+            0,
+            0
+        )
+
+    avg_range = average_range(hist)
+
+    if avg_range <= 0:
+
+        risk = price * 0.025
+
+    else:
+
+        risk = max(
+            price * 0.015,
+            avg_range * 0.8
+        )
+
+    sl = price - risk
+
+    tp1 = price + risk * 1.2
+
+    tp2 = price + risk * 2.0
+
+    entry = round(
+        price / 10
+    ) * 10
+
+    sl = round(
+        sl / 10
+    ) * 10
+
+    tp1 = round(
+        tp1 / 10
+    ) * 10
+
+    tp2 = round(
+        tp2 / 10
+    ) * 10
+
+    return (
+        int(entry),
+        int(sl),
+        int(tp1),
+        int(tp2),
+    )
+
+
+# =========================================================
+# 종가 전략
+# =========================================================
+
+def close_score(
+    rt,
+    hist,
+):
+
+    if not rt:
         return 0, {}
 
-    closes = [x["close"] for x in hist if x["close"] > 0]
-    if len(closes) < 6:
+    if len(hist) < 20:
         return 0, {}
 
-    # Hist is newest -> oldest in normal Naver response.
-    latest_close = closes[0]
-    prev_close = closes[1] if len(closes) > 1 else 0
-    ma5 = sum(closes[:5]) / min(5, len(closes))
-    ma20 = sum(closes[:20]) / min(20, len(closes))
-    ret5 = pct(latest_close, closes[5]) if len(closes) > 5 else 0
-    prior20_high = max([x["high"] for x in hist[1:21] if x["high"] > 0] or [0])
+    price = rt["price"]
 
-    # Current price relative to today's range.
+    if price <= 0:
+        return 0, {}
+
+    closes = [
+        x["close"]
+        for x in hist
+        if x["close"] > 0
+    ]
+
+    if len(closes) < 20:
+        return 0, {}
+
+    ma5 = sum(
+        closes[:5]
+    ) / 5
+
+    ma20 = sum(
+        closes[:20]
+    ) / 20
+
+    ret5 = pct(
+        closes[0],
+        closes[5]
+    )
+
+    ret20 = pct(
+        closes[0],
+        closes[20]
+    ) if len(closes) > 20 else 0
+
+    previous_high = max(
+        x["high"]
+        for x in hist[1:21]
+        if x["high"] > 0
+    )
+
+    today_high = rt["high"]
+    today_low = rt["low"]
+
     hold = 0.5
-    if high > low > 0:
-        hold = (p - low) / (high - low)
 
-    # Volume vs 20-day average.
-    vols = [x["volume"] for x in hist[1:21] if x["volume"] > 0]
-    avg_vol = sum(vols) / len(vols) if vols else 0
-    vol_ratio = rt["volume"] / avg_vol if avg_vol else 0
+    if (
+        today_high > 0
+        and today_low > 0
+        and today_high > today_low
+    ):
+
+        hold = (
+            price - today_low
+        ) / (
+            today_high - today_low
+        )
+
+    volumes = [
+        x["volume"]
+        for x in hist[1:21]
+        if x["volume"] > 0
+    ]
+
+    avg_volume = (
+        sum(volumes)
+        / len(volumes)
+        if volumes
+        else 0
+    )
+
+    volume_ratio = (
+        rt["volume"]
+        / avg_volume
+        if avg_volume > 0
+        else 0
+    )
 
     score = 0
 
-    # Trend
+    # -------------------------
+    # 추세
+    # -------------------------
+
     if ma5 > ma20:
         score += 15
-    if len(closes) >= 11:
-        ma10 = sum(closes[:10]) / 10
-        if ma10 > ma20:
-            score += 10
 
-    # Daily strength
-    if chg >= 5:
-        score += 15
-    elif chg >= 3:
-        score += 12
-    elif chg >= 1:
-        score += 7
-    elif chg < -2:
-        score -= 15
-
-    # 5-day momentum
-    if 1.5 <= ret5 <= 15:
-        score += 10
-    elif ret5 > 15:
-        score += 3
-
-    # Volume acceleration
-    if vol_ratio >= 3:
-        score += 15
-    elif vol_ratio >= 2:
-        score += 10
-    elif vol_ratio >= 1.5:
-        score += 5
-
-    # Breakout
-    if prior20_high > 0:
-        if p >= prior20_high:
-            score += 15
-        elif p >= prior20_high * 0.98:
-            score += 10
-
-    # Holding near high
-    if hold >= 0.85:
-        score += 15
-    elif hold >= 0.70:
+    if price > ma5:
         score += 8
 
-    # Turnover
-    if turnover >= 5_000_000_000:
-        score += 10
-    elif turnover >= 1_000_000_000:
-        score += 7
-    elif turnover >= 500_000_000:
-        score += 4
+    # -------------------------
+    # 당일 상승
+    # -------------------------
 
-    # Avoid chasing a failed gap-up
-    if mode == "morning" and chg >= 3 and hold < 0.60:
-        score -= 20
-    if mode == "close" and chg >= 7 and hold < 0.60:
+    change = rt["change_pct"]
+
+    if 1 <= change <= 6:
+        score += 10
+
+    elif 6 < change <= 10:
+        score += 5
+
+    elif change > 10:
+        score -= 5
+
+    elif change < -5:
         score -= 10
 
-    score = max(0, min(100, int(score)))
+    # -------------------------
+    # 5일 모멘텀
+    # -------------------------
+
+    if 0 < ret5 <= 12:
+        score += 10
+
+    elif ret5 > 12:
+        score += 4
+
+    # -------------------------
+    # 20일 모멘텀
+    # -------------------------
+
+    if ret20 > 0:
+        score += 5
+
+    # -------------------------
+    # 거래량
+    # -------------------------
+
+    if volume_ratio >= 3:
+        score += 15
+
+    elif volume_ratio >= 2:
+        score += 10
+
+    elif volume_ratio >= 1.5:
+        score += 6
+
+    # -------------------------
+    # 전고점
+    # -------------------------
+
+    if previous_high > 0:
+
+        if price >= previous_high:
+            score += 15
+
+        elif price >= previous_high * 0.98:
+            score += 8
+
+    # -------------------------
+    # 종가 강도
+    # -------------------------
+
+    if hold >= 0.90:
+        score += 15
+
+    elif hold >= 0.80:
+        score += 10
+
+    elif hold >= 0.70:
+        score += 5
+
+    # -------------------------
+    # 거래대금
+    # -------------------------
+
+    turnover = rt["turnover"]
+
+    if turnover >= 10_000_000_000:
+        score += 10
+
+    elif turnover >= 5_000_000_000:
+        score += 8
+
+    elif turnover >= 1_000_000_000:
+        score += 5
+
+    elif turnover < MIN_TURNOVER:
+        score -= 10
+
+    # -------------------------
+    # 급등 추격 방지
+    # -------------------------
+
+    if change >= 12:
+        score -= 12
+
+    if hold < 0.55:
+        score -= 12
+
+    score = max(
+        0,
+        min(
+            100,
+            int(score)
+        )
+    )
 
     metrics = {
-        "change_pct": chg,
+        "change_pct": change,
         "ret5": ret5,
-        "vol_ratio": vol_ratio,
+        "ret20": ret20,
+        "volume_ratio": volume_ratio,
         "hold": hold,
         "turnover": turnover,
         "ma5": ma5,
         "ma20": ma20,
-        "prior20_high": prior20_high,
+        "previous_high": previous_high,
     }
+
     return score, metrics
 
 
-def make_levels(price):
-    # Conservative fixed levels; not a profit guarantee.
-    entry = int(round(price / 10) * 10)
-    sl = int(round(price * 0.95 / 10) * 10)
-    tp1 = int(round(price * 1.03 / 10) * 10)
-    tp2 = int(round(price * 1.06 / 10) * 10)
-    return entry, sl, tp1, tp2
+# =========================================================
+# 장초 전략
+# =========================================================
 
+def morning_score(
+    rt,
+    hist,
+    previous_snapshot=None,
+):
 
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {
-            "positions": {},
-            "sent_signals": {},
-            "last_run": "",
-        }
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            data.setdefault("positions", {})
-            data.setdefault("sent_signals", {})
-            data.setdefault("last_run", "")
-            return data
-    except Exception:
-        return {"positions": {}, "sent_signals": {}, "last_run": ""}
+    if not rt:
+        return 0, {}
 
+    if len(hist) < 20:
+        return 0, {}
 
-def save_state(state):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, STATE_FILE)
+    price = rt["price"]
 
+    if price <= 0:
+        return 0, {}
 
-def signal_key(mode):
-    return f"{today_key()}:{mode}"
+    change = rt["change_pct"]
 
+    score = 0
 
-def cleanup_old_signals(state):
-    cutoff = (now_kst() - timedelta(days=5)).strftime("%Y-%m-%d")
-    state["sent_signals"] = {
-        k: v for k, v in state["sent_signals"].items()
-        if k[:10] >= cutoff
-    }
+    # =====================================================
+    # 1. 상승률
+    # =====================================================
 
+    if 1.0 <= change <= 5.0:
+        score += 15
 
-def format_signal(item, mode, score, metrics, entry, sl, tp1, tp2):
-    if mode == "close":
-        title = "🚨 <b>[종가 상승 후보]</b>"
-        note = "⏰ 15:30 장 마감 전 매수 판단용"
-    else:
-        title = "🌅 <b>[장초 상승 후보]</b>"
-        note = "⏰ 장초 상승 모멘텀 후보"
+    elif 0.5 <= change < 1.0:
+        score += 8
 
-    url = f"https://finance.naver.com/item/main.naver?code={item['code']}"
-    return (
-        f"{title}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📌 <b>{item['name']}</b> <code>({item['code']})</code>\n"
-        f"💰 현재가: <code>{entry:,}원</code>\n"
-        f"📈 등락률: <code>{metrics['change_pct']:+.2f}%</code>\n"
-        f"💵 거래대금: <code>{metrics['turnover']/100_000_000:,.0f}억원</code>\n"
-        f"📊 상승점수: <code>{score}/100</code>\n"
-        f"📦 거래량/20일평균: <code>{metrics['vol_ratio']:.1f}배</code>\n"
-        f"📈 5일 수익률: <code>{metrics['ret5']:+.2f}%</code>\n"
-        f"💰 진입 기준: <code>{entry:,}원</code>\n"
-        f"🛡 SL: <code>{sl:,}원</code>\n"
-        f"🎯 TP1: <code>{tp1:,}원</code>\n"
-        f"🎯 TP2: <code>{tp2:,}원</code>\n"
-        f"🔗 <a href='{url}'>네이버 차트</a>\n"
-        f"{note}\n"
-        f"⚠️ 조건 기반 후보이며 상승을 보장하지 않습니다."
+    elif 5.0 < change <= 8.0:
+        score += 8
+
+    elif change > 10:
+        score -= 10
+
+    elif change < 0:
+        score -= 10
+
+    # =====================================================
+    # 2. 거래대금
+    # =====================================================
+
+    turnover = rt["turnover"]
+
+    if turnover >= 5_000_000_000:
+        score += 15
+
+    elif turnover >= 2_000_000_000:
+        score += 10
+
+    elif turnover >= 1_000_000_000:
+        score += 6
+
+    elif turnover < MIN_TURNOVER:
+        score -= 8
+
+    # =====================================================
+    # 3. 장중 고점 유지
+    # =====================================================
+
+    high = rt["high"]
+    low = rt["low"]
+
+    hold = 0.5
+
+    if (
+        high > 0
+        and low > 0
+        and high > low
+    ):
+
+        hold = (
+            price - low
+        ) / (
+            high - low
+        )
+
+    if hold >= 0.85:
+        score += 15
+
+    elif hold >= 0.70:
+        score += 8
+
+    elif hold < 0.45:
+        score -= 12
+
+    # =====================================================
+    # 4. 일봉 추세
+    # =====================================================
+
+    closes = [
+        x["close"]
+        for x in hist
+        if x["close"] > 0
+    ]
+
+    ma5 = sum(
+        closes[:5]
+    ) / 5
+
+    ma20 = sum(
+        closes[:20]
+    ) / 20
+
+    if ma5 > ma20:
+        score += 10
+
+    if price > ma5:
+        score += 8
+
+    # =====================================================
+    # 5. 5일 모멘텀
+    # =====================================================
+
+    ret5 = pct(
+        closes[0],
+        closes[5]
     )
 
+    if 0 < ret5 < 12:
+        score += 8
 
-def screen(mode):
-    print(f"=== {mode} screening ===")
+    elif ret5 >= 12:
+        score += 3
 
-    # Two independent ranking pools: trading volume and rising stocks.
+    # =====================================================
+    # 6. 전고점 접근
+    # =====================================================
+
+    previous_high = max(
+        x["high"]
+        for x in hist[1:21]
+        if x["high"] > 0
+    )
+
+    if previous_high > 0:
+
+        if price >= previous_high:
+            score += 15
+
+        elif price >= previous_high * 0.985:
+            score += 8
+
+    # =====================================================
+    # 7. 이전 실행보다 가격이 올라가는지
+    # =====================================================
+
+    momentum = 0
+
+    if previous_snapshot:
+
+        previous_price = num(
+            previous_snapshot.get(
+                "price"
+            )
+        )
+
+        previous_volume = num(
+            previous_snapshot.get(
+                "volume"
+            )
+        )
+
+        if (
+            previous_price > 0
+            and price > previous_price
+        ):
+
+            momentum += 5
+
+        if (
+            previous_volume > 0
+            and rt["volume"]
+            > previous_volume
+        ):
+
+            momentum += 5
+
+    score += momentum
+
+    # =====================================================
+    # 8. 과도한 추격 방지
+    # =====================================================
+
+    if change >= 9:
+        score -= 10
+
+    if hold < 0.50:
+        score -= 8
+
+    score = max(
+        0,
+        min(
+            100,
+            int(score)
+        )
+    )
+
+    metrics = {
+        "change_pct": change,
+        "turnover": turnover,
+        "hold": hold,
+        "ma5": ma5,
+        "ma20": ma20,
+        "ret5": ret5,
+        "previous_high": previous_high,
+        "momentum": momentum,
+    }
+
+    return score, metrics
+
+
+# =========================================================
+# 후보 풀
+# =========================================================
+
+def build_pool():
+
     pool = {}
-    for category in ("KOSPI", "KOSDAQ"):
-        for sort_type in ("quantTop", "up"):
-            rows = get_rankings(sort_type, category, pages=2, page_size=100)
-            for x in rows:
-                if x["price"] >= MIN_PRICE:
-                    pool[x["code"]] = x
+
+    for category in (
+        "KOSPI",
+        "KOSDAQ",
+    ):
+
+        for sort_type in (
+            "quantTop",
+            "up",
+        ):
+
+            rows = get_rankings(
+                sort_type,
+                category,
+                pages=2,
+                page_size=100,
+            )
+
+            for item in rows:
+
+                if item["price"] < MIN_PRICE:
+                    continue
+
+                pool[
+                    item["code"]
+                ] = item
+
+    print(
+        f"전체 후보 풀: {len(pool)}개"
+    )
+
+    return pool
+
+
+# =========================================================
+# 종가 후보 탐색
+# =========================================================
+
+def screen_close():
+
+    print()
+    print(
+        "===================================="
+    )
+    print(
+        " CLOSE BUY HUNTER"
+    )
+    print(
+        " 15:20 종가 매수 후보"
+    )
+    print(
+        "===================================="
+    )
+
+    pool = build_pool()
 
     if not pool:
+
         send_telegram(
-            f"⚠️ <b>[{mode.upper()} 스크리닝 오류]</b>\n"
-            "시장 종목 목록을 가져오지 못했습니다.\n"
-            "잠시 후 다시 실행하세요."
+            "⚠️ <b>[종가 헌터 데이터 오류]</b>\n"
+            "시장 종목 데이터를 가져오지 못했습니다."
         )
+
         return
 
-    # Limit expensive quote/history calls.
     rough = sorted(
         pool.values(),
-        key=lambda x: (x.get("turnover", 0), x.get("change_pct", 0)),
+        key=lambda x: (
+            x.get("turnover", 0),
+            x.get("change_pct", 0),
+        ),
         reverse=True,
-    )[:MAX_CANDIDATES]
+    )
+
+    rough = rough[
+        :MAX_CANDIDATES
+    ]
 
     candidates = []
 
+    checked = 0
+    history_fail = 0
+    score_fail = 0
+
     for item in rough:
-        rt = get_realtime(item["code"])
-        if not rt or rt["price"] < MIN_PRICE:
+
+        rt = get_realtime(
+            item["code"]
+        )
+
+        if not rt:
             continue
 
-        # For a close candidate, do not select a falling stock.
-        if mode == "close" and rt["change_pct"] < 0:
+        if rt["price"] < MIN_PRICE:
             continue
 
-        # Basic liquidity filter.
-        if rt["turnover"] and rt["turnover"] < MIN_TURNOVER:
+        if (
+            rt["turnover"] > 0
+            and rt["turnover"]
+            < MIN_TURNOVER
+        ):
             continue
 
-        hist = get_history(item["code"], 35)
-        score, metrics = calc_score(rt, hist, mode)
+        hist = get_history(
+            item["code"]
+        )
 
-        threshold = 72
-        if score >= threshold:
+        if len(hist) < 20:
+
+            history_fail += 1
+
+            continue
+
+        checked += 1
+
+        score, metrics = close_score(
+            rt,
+            hist,
+        )
+
+        print(
+            f"{item['name']} "
+            f"{item['code']} "
+            f"score={score} "
+            f"change={rt['change_pct']:+.2f}% "
+            f"turnover="
+            f"{rt['turnover']/100_000_000:.0f}억"
+        )
+
+        if score >= CLOSE_THRESHOLD:
+
             merged = dict(item)
+
             merged.update(rt)
-            candidates.append((score, merged, metrics))
+
+            candidates.append(
+                (
+                    score,
+                    merged,
+                    metrics,
+                    hist,
+                )
+            )
+
+        else:
+
+            score_fail += 1
 
         time.sleep(0.08)
 
     candidates.sort(
-        key=lambda z: (
-            z[0],
-            z[1].get("turnover", 0),
-            z[1].get("change_pct", 0),
+        key=lambda x: (
+            x[0],
+            x[1]["turnover"],
+            x[1]["change_pct"],
         ),
         reverse=True,
     )
-    candidates = candidates[:MAX_RESULTS]
 
-    state = load_state()
-    cleanup_old_signals(state)
+    candidates = candidates[
+        :MAX_RESULTS
+    ]
 
-    key = signal_key(mode)
-
-    # Avoid sending the same mode more than once per day when scheduled.
-    # Manual runs can force a scan by setting FORCE_SCAN=1.
-    if state["sent_signals"].get(key) and os.getenv("FORCE_SCAN", "0") != "1":
-        print(f"Already sent {key}")
-        save_state(state)
-        return
+    print(
+        f"검사={checked} "
+        f"후보={len(candidates)} "
+        f"history_fail={history_fail} "
+        f"score_fail={score_fail}"
+    )
 
     if not candidates:
-        send_telegram(
-            f"🔎 <b>[{mode.upper()} 스크리닝 완료]</b>\n"
-            f"오늘 현재 조건을 만족하는 상승 후보가 없습니다.\n"
-            f"조건을 억지로 완화해서 종목을 보내지는 않습니다."
+
+        print(
+            "종가 후보 없음"
         )
-        state["sent_signals"][key] = True
-        save_state(state)
+
         return
 
-    blocks = []
-    for score, item, metrics in candidates:
-        entry, sl, tp1, tp2 = make_levels(item["price"])
+    state = load_state()
 
-        # One active position per ticker.
-        state["positions"][item["code"]] = {
-            "code": item["code"],
+    today = today_key()
+
+    blocks = []
+
+    new_count = 0
+
+    for (
+        score,
+        item,
+        metrics,
+        hist,
+    ) in candidates:
+
+        code = item["code"]
+
+        signal_key = (
+            f"{today}:close:{code}"
+        )
+
+        if state[
+            "sent_signals"
+        ].get(signal_key):
+
+            continue
+
+        entry, sl, tp1, tp2 = make_levels(
+            item["price"],
+            hist,
+        )
+
+        state["sent_signals"][
+            signal_key
+        ] = {
+            "sent_at": now_kst().isoformat(),
+            "score": score,
+        }
+
+        state["positions"][
+            code
+        ] = {
+            "code": code,
             "name": item["name"],
-            "mode": mode,
+            "mode": "close",
             "entry": entry,
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
-            "tp1_hit": False,
+            "score": score,
             "status": "ACTIVE",
             "created_at": now_kst().isoformat(),
-            "score": score,
+            "tp1_hit": False,
         }
 
         blocks.append(
-            format_signal(item, mode, score, metrics, entry, sl, tp1, tp2)
+            format_signal(
+                item,
+                "close",
+                score,
+                metrics,
+                entry,
+                sl,
+                tp1,
+                tp2,
+            )
         )
 
-    header = (
-        "📡 <b>[한국 주식 상승 헌터]</b>\n"
-        f"🕒 {now_kst().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        new_count += 1
+
+    if blocks:
+
+        header = (
+            "📡 <b>[한국 주식 상승 헌터]</b>\n"
+            "🔵 <b>[종가 매수 후보]</b>\n"
+            f"🕒 {now_kst().strftime('%H:%M:%S')}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "⏰ 15:20 종가 매수 판단용\n\n"
+        )
+
+        send_telegram(
+            header
+            + "\n\n".join(blocks)
+        )
+
+        save_state(state)
+
+        print(
+            f"종가 신호 {new_count}개 전송"
+        )
+
+
+# =========================================================
+# 장초 후보 탐색
+# =========================================================
+
+def screen_morning():
+
+    print()
+    print(
+        "===================================="
+    )
+    print(
+        " MORNING RISE HUNTER"
+    )
+    print(
+        " 09:00~09:30 장초 상승 후보"
+    )
+    print(
+        "===================================="
     )
 
-    send_telegram(header + "\n\n".join(blocks))
-    state["sent_signals"][key] = True
+    pool = build_pool()
+
+    if not pool:
+
+        send_telegram(
+            "⚠️ <b>[장초 헌터 데이터 오류]</b>\n"
+            "시장 종목 데이터를 가져오지 못했습니다."
+        )
+
+        return
+
+    state = load_state()
+
+    rough = sorted(
+        pool.values(),
+        key=lambda x: (
+            x.get("turnover", 0),
+            x.get("change_pct", 0),
+        ),
+        reverse=True,
+    )
+
+    rough = rough[
+        :MAX_CANDIDATES
+    ]
+
+    candidates = []
+
+    for item in rough:
+
+        rt = get_realtime(
+            item["code"]
+        )
+
+        if not rt:
+            continue
+
+        if rt["price"] < MIN_PRICE:
+            continue
+
+        if (
+            rt["turnover"] > 0
+            and rt["turnover"]
+            < MIN_TURNOVER
+        ):
+            continue
+
+        hist = get_history(
+            item["code"]
+        )
+
+        if len(hist) < 20:
+            continue
+
+        previous_snapshot = (
+            state["snapshots"].get(
+                item["code"]
+            )
+        )
+
+        score, metrics = morning_score(
+            rt,
+            hist,
+            previous_snapshot,
+        )
+
+        # 현재 가격을 다음 실행의 비교 기준으로 저장
+        state["snapshots"][
+            item["code"]
+        ] = {
+            "price": rt["price"],
+            "volume": rt["volume"],
+            "change_pct": rt["change_pct"],
+            "time": now_kst().isoformat(),
+        }
+
+        if score >= MORNING_THRESHOLD:
+
+            candidates.append(
+                (
+                    score,
+                    rt,
+                    metrics,
+                    hist,
+                )
+            )
+
+        time.sleep(0.08)
+
+    candidates.sort(
+        key=lambda x: (
+            x[0],
+            x[1]["turnover"],
+            x[1]["change_pct"],
+        ),
+        reverse=True,
+    )
+
+    candidates = candidates[
+        :MAX_RESULTS
+    ]
+
+    if not candidates:
+
+        print(
+            "장초 후보 없음"
+        )
+
+        save_state(state)
+
+        return
+
+    today = today_key()
+
+    blocks = []
+
+    for (
+        score,
+        rt,
+        metrics,
+        hist,
+    ) in candidates:
+
+        code = rt["code"]
+
+        signal_key = (
+            f"{today}:morning:{code}"
+        )
+
+        # 같은 날 같은 종목은 한 번만 알림
+        if state[
+            "sent_signals"
+        ].get(signal_key):
+
+            continue
+
+        entry, sl, tp1, tp2 = make_levels(
+            rt["price"],
+            hist,
+        )
+
+        state[
+            "sent_signals"
+        ][signal_key] = {
+            "sent_at": now_kst().isoformat(),
+            "score": score,
+        }
+
+        state[
+            "positions"
+        ][code] = {
+            "code": code,
+            "name": rt["name"],
+            "mode": "morning",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "score": score,
+            "status": "ACTIVE",
+            "created_at": now_kst().isoformat(),
+            "tp1_hit": False,
+        }
+
+        blocks.append(
+            format_signal(
+                rt,
+                "morning",
+                score,
+                metrics,
+                entry,
+                sl,
+                tp1,
+                tp2,
+            )
+        )
+
+    if blocks:
+
+        header = (
+            "📡 <b>[한국 주식 상승 헌터]</b>\n"
+            "🟢 <b>[장초 상승 후보]</b>\n"
+            f"🕒 {now_kst().strftime('%H:%M:%S')}\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "⏰ 장초 상승 모멘텀 후보\n\n"
+        )
+
+        send_telegram(
+            header
+            + "\n\n".join(blocks)
+        )
+
     save_state(state)
 
 
+# =========================================================
+# Signal 메시지
+# =========================================================
+
+def format_signal(
+    item,
+    mode,
+    score,
+    metrics,
+    entry,
+    sl,
+    tp1,
+    tp2,
+):
+
+    if mode == "close":
+
+        title = (
+            "🔵 <b>[종가 매수 후보]</b>"
+        )
+
+        note = (
+            "⏰ 15:20 종가 매수 판단용"
+        )
+
+    else:
+
+        title = (
+            "🟢 <b>[장초 상승 후보]</b>"
+        )
+
+        note = (
+            "⏰ 장초 상승 모멘텀 후보"
+        )
+
+    turnover = (
+        metrics.get(
+            "turnover",
+            0
+        )
+        / 100_000_000
+    )
+
+    volume_ratio = metrics.get(
+        "volume_ratio",
+        0
+    )
+
+    if volume_ratio:
+        volume_text = (
+            f"{volume_ratio:.1f}배"
+        )
+    else:
+        volume_text = "실시간 증가 확인"
+
+    url = (
+        "https://finance.naver.com/"
+        f"item/main.naver?code="
+        f"{item['code']}"
+    )
+
+    return (
+        f"{title}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{item['name']}</b> "
+        f"<code>({item['code']})</code>\n"
+        f"💰 현재가: "
+        f"<code>{entry:,}원</code>\n"
+        f"📈 등락률: "
+        f"<code>{metrics.get('change_pct', 0):+.2f}%</code>\n"
+        f"💵 거래대금: "
+        f"<code>{turnover:,.0f}억원</code>\n"
+        f"📊 신호점수: "
+        f"<code>{score}/100</code>\n"
+        f"📦 거래량: "
+        f"<code>{volume_text}</code>\n"
+        f"📈 5일 수익률: "
+        f"<code>{metrics.get('ret5', 0):+.2f}%</code>\n"
+        f"💰 ENTRY: "
+        f"<code>{entry:,}원</code>\n"
+        f"🛡 SL: "
+        f"<code>{sl:,}원</code>\n"
+        f"🎯 TP1: "
+        f"<code>{tp1:,}원</code>\n"
+        f"🎯 TP2: "
+        f"<code>{tp2:,}원</code>\n"
+        f"🔗 <a href='{url}'>네이버 차트</a>\n"
+        f"{note}\n"
+        "⚠️ 조건 기반 후보이며 "
+        "수익을 보장하지 않습니다."
+    )
+
+
+# =========================================================
+# 보유 후보 감시
+# =========================================================
+
 def monitor_positions():
+
     state = load_state()
-    positions = state.get("positions", {})
+
+    positions = state.get(
+        "positions",
+        {}
+    )
+
     if not positions:
         return
 
     changed = False
 
-    for code, pos in list(positions.items()):
-        if pos.get("status") != "ACTIVE":
+    for code, pos in list(
+        positions.items()
+    ):
+
+        if pos.get(
+            "status"
+        ) != "ACTIVE":
+
             continue
 
         rt = get_realtime(code)
-        if not rt or rt["price"] <= 0:
+
+        if not rt:
             continue
 
         price = rt["price"]
-        entry = num(pos.get("entry"))
-        sl = num(pos.get("sl"))
-        tp1 = num(pos.get("tp1"))
-        tp2 = num(pos.get("tp2"))
 
-        # TP2 has priority if the observed price reaches it.
+        entry = num(
+            pos.get("entry")
+        )
+
+        sl = num(
+            pos.get("sl")
+        )
+
+        tp1 = num(
+            pos.get("tp1")
+        )
+
+        tp2 = num(
+            pos.get("tp2")
+        )
+
+        # TP2
         if price >= tp2:
+
             send_telegram(
-                f"🔥 <b>[TP2 도달]</b>\n"
-                f"📌 <b>{pos['name']}</b> <code>({code})</code>\n"
-                f"💰 진입가: <code>{entry:,.0f}원</code>\n"
-                f"🎯 TP2: <code>{tp2:,.0f}원</code>\n"
-                f"📈 현재가: <code>{price:,.0f}원</code>\n"
-                f"📊 수익률: <code>{pct(price, entry):+.2f}%</code>\n"
-                f"✅ 포지션 감시 종료"
+                "🔥 <b>[TP2 도달]</b>\n"
+                f"📌 <b>{pos['name']}</b>\n"
+                f"💰 ENTRY: "
+                f"<code>{entry:,.0f}</code>\n"
+                f"🎯 TP2: "
+                f"<code>{tp2:,.0f}</code>\n"
+                f"📈 현재가: "
+                f"<code>{price:,.0f}</code>\n"
+                f"📊 수익률: "
+                f"<code>{pct(price, entry):+.2f}%</code>\n"
+                "✅ 감시 종료"
             )
+
             pos["status"] = "TP2"
+
             changed = True
+
             continue
 
-        if price >= tp1 and not pos.get("tp1_hit", False):
-            send_telegram(
-                f"🎯 <b>[TP1 도달]</b>\n"
-                f"📌 <b>{pos['name']}</b> <code>({code})</code>\n"
-                f"💰 진입가: <code>{entry:,.0f}원</code>\n"
-                f"🎯 TP1: <code>{tp1:,.0f}원</code>\n"
-                f"📈 현재가: <code>{price:,.0f}원</code>\n"
-                f"📊 수익률: <code>{pct(price, entry):+.2f}%</code>\n"
-                f"➡️ TP2: <code>{tp2:,.0f}원</code> 계속 감시"
+        # TP1
+        if (
+            price >= tp1
+            and not pos.get(
+                "tp1_hit",
+                False
             )
+        ):
+
+            send_telegram(
+                "🎯 <b>[TP1 도달]</b>\n"
+                f"📌 <b>{pos['name']}</b>\n"
+                f"💰 ENTRY: "
+                f"<code>{entry:,.0f}</code>\n"
+                f"🎯 TP1: "
+                f"<code>{tp1:,.0f}</code>\n"
+                f"📈 현재가: "
+                f"<code>{price:,.0f}</code>\n"
+                f"📊 수익률: "
+                f"<code>{pct(price, entry):+.2f}%</code>\n"
+                f"➡️ TP2: "
+                f"<code>{tp2:,.0f}</code>"
+            )
+
             pos["tp1_hit"] = True
+
             changed = True
 
+        # SL
         if price <= sl:
+
             send_telegram(
-                f"🛡️ <b>[SL 손절가 도달]</b>\n"
-                f"📌 <b>{pos['name']}</b> <code>({code})</code>\n"
-                f"💰 진입가: <code>{entry:,.0f}원</code>\n"
-                f"🛡 SL: <code>{sl:,.0f}원</code>\n"
-                f"📉 현재가: <code>{price:,.0f}원</code>\n"
-                f"📊 수익률: <code>{pct(price, entry):+.2f}%</code>\n"
-                f"⚠️ 포지션 감시 종료"
+                "🛡️ <b>[SL 도달]</b>\n"
+                f"📌 <b>{pos['name']}</b>\n"
+                f"💰 ENTRY: "
+                f"<code>{entry:,.0f}</code>\n"
+                f"🛡 SL: "
+                f"<code>{sl:,.0f}</code>\n"
+                f"📉 현재가: "
+                f"<code>{price:,.0f}</code>\n"
+                f"📊 수익률: "
+                f"<code>{pct(price, entry):+.2f}%</code>\n"
+                "⚠️ 감시 종료"
             )
+
             pos["status"] = "SL"
+
             changed = True
 
-    # Keep only recent completed positions to prevent unlimited state growth.
-    cutoff = now_kst() - timedelta(days=14)
-    for code, pos in list(positions.items()):
-        if pos.get("status") in ("TP2", "SL"):
-            try:
-                created = datetime.fromisoformat(pos.get("created_at", ""))
-                if created < cutoff:
-                    del positions[code]
-                    changed = True
-            except Exception:
-                pass
+    # 오래된 종료 포지션 정리
+    cutoff = (
+        now_kst()
+        - timedelta(days=14)
+    )
+
+    for code, pos in list(
+        positions.items()
+    ):
+
+        if pos.get(
+            "status"
+        ) not in (
+            "TP2",
+            "SL",
+        ):
+            continue
+
+        try:
+
+            created = datetime.fromisoformat(
+                pos.get(
+                    "created_at",
+                    ""
+                )
+            )
+
+            if created < cutoff:
+
+                del positions[code]
+
+                changed = True
+
+        except Exception:
+            pass
 
     if changed:
+
         state["positions"] = positions
+
         save_state(state)
 
 
+# =========================================================
+# 오래된 신호 정리
+# =========================================================
+
+def cleanup_state(state):
+
+    cutoff = (
+        now_kst()
+        - timedelta(days=7)
+    ).strftime(
+        "%Y-%m-%d"
+    )
+
+    new_sent = {}
+
+    for key, value in state[
+        "sent_signals"
+    ].items():
+
+        if key[:10] >= cutoff:
+
+            new_sent[key] = value
+
+    state[
+        "sent_signals"
+    ] = new_sent
+
+    # Snapshot은 현재 날짜 기준으로만 유지
+    current_date = today_key()
+
+    new_snapshots = {}
+
+    for code, value in state[
+        "snapshots"
+    ].items():
+
+        if value.get(
+            "time",
+            ""
+        )[:10] == current_date:
+
+            new_snapshots[
+                code
+            ] = value
+
+    state[
+        "snapshots"
+    ] = new_snapshots
+
+
+# =========================================================
+# 실행 모드
+# =========================================================
+
 def get_mode():
-    forced = os.getenv("MODE", "").strip().lower()
-    if forced in ("morning", "close", "monitor"):
+
+    forced = os.getenv(
+        "MODE",
+        ""
+    ).strip().lower()
+
+    if forced in (
+        "morning",
+        "close",
+        "monitor",
+    ):
+
         return forced
 
-    # Automatic mode based on KST.
     t = now_kst()
-    hm = t.hour * 60 + t.minute
 
-    # 09:00~09:30: morning scan
-    if 9 * 60 <= hm <= 9 * 60 + 30:
+    hm = (
+        t.hour * 60
+        + t.minute
+    )
+
+    # 장초
+    if (
+        9 * 60
+        <= hm
+        <= 9 * 60 + 30
+    ):
+
         return "morning"
 
-    # 15:00~15:20: pre-close scan
-    if 15 * 60 <= hm <= 15 * 60 + 20:
+    # 종가
+    if (
+        15 * 60 + 5
+        <= hm
+        <= 15 * 60 + 25
+    ):
+
         return "close"
 
     return "monitor"
 
 
+# =========================================================
+# 메인
+# =========================================================
+
 def run():
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        raise RuntimeError("TELEGRAM_TOKEN 또는 CHAT_ID가 없습니다.")
 
-    mode = get_mode()
-    print(f"KST={now_kst().isoformat()} mode={mode}")
+    if (
+        not TELEGRAM_TOKEN
+        or not CHAT_ID
+    ):
 
-    # Always monitor first.
-    monitor_positions()
-
-    if mode in ("morning", "close"):
-        screen(mode)
+        raise RuntimeError(
+            "TELEGRAM_TOKEN 또는 CHAT_ID가 없습니다."
+        )
 
     state = load_state()
-    state["last_run"] = now_kst().isoformat()
+
+    cleanup_state(state)
+
+    mode = get_mode()
+
+    print(
+        "===================================="
+    )
+
+    print(
+        " KOREA STOCK HUNTER V2"
+    )
+
+    print(
+        f" KST: {now_kst().isoformat()}"
+    )
+
+    print(
+        f" MODE: {mode}"
+    )
+
+    print(
+        "===================================="
+    )
+
+    # 기존 후보 감시
+    monitor_positions()
+
+    if mode == "morning":
+
+        screen_morning()
+
+    elif mode == "close":
+
+        screen_close()
+
+    state = load_state()
+
+    state[
+        "last_run"
+    ] = now_kst().isoformat()
+
     save_state(state)
 
-    print("=== DONE ===")
+    print(
+        "===================================="
+    )
+
+    print(
+        " DONE"
+    )
+
+    print(
+        "===================================="
+    )
 
 
 if __name__ == "__main__":
