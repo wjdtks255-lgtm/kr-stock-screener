@@ -1,34 +1,31 @@
 name: Korea Stock Hunter V5.3
 
 on:
-  workflow_dispatch: # GITHUB 웹상에서 수동으로 즉시 실행할 수 있는 버튼 제공
+  workflow_dispatch:
   schedule:
-    # 💡 GitHub Actions의 cron은 UTC 시간 기준입니다. (KST(한국 시간)보다 9시간 느림)
-    # 평일(월-금) KST 기준 오후 3시 35분에 하루에 딱 한 번 실행되도록 설정된 값입니다.
-    - cron: '35 6 * * 1-5'
+    # 1. 오전 09:05 KST (00:05 UTC) - 시초가 갭 공략 탐색
+    - cron: '5 0 * * 1-5'
+    # 2. 오후 15:15 KST (06:15 UTC) - 15시 20분 동시호가 진입 전 종가베팅 종목 탐색
+    - cron: '15 6 * * 1-5'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. 저장소 체크아웃
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # 2. 파이썬 환경 설정 (Python 3.10)
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    # 3. 필수 라이브러리 설치 (requests, pandas, finance-datareader)
     - name: Install dependencies
       run: |
         pip install --upgrade pip
-        pip install requests pandas finance-datareader
+        pip install requests pandas finance-datareader pytz
 
-    # 4. 주식 전략 스크리닝 실행
     - name: Run Stock Hunter
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
