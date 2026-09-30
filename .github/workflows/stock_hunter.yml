@@ -1,38 +1,37 @@
 name: Korea Stock Hunter V5.3
 
 on:
-  workflow_dispatch:  # GitHub 웹상에서 수동으로 즉시 실행할 수 있는 버튼 제공
+  workflow_dispatch: # GITHUB 웹상에서 수동으로 즉시 실행할 수 있는 버튼 제공
   schedule:
     # 💡 GitHub Actions의 cron은 UTC 시간 기준입니다. (KST(한국 시간)보다 9시간 느림)
-    # 아래 설정은 평일(월~금) KST 기준 오전 9시부터 오후 3시 30분까지 약 30분 간격으로 자동 실행되도록 설정된 값입니다.
-    # [KST 기준 실행 시간 예시: 09:05, 09:30, 10:00, 10:30, ... 15:00]
-    - cron: '5,30 0-6 * * 1-5'
+    # 평일(월-금) KST 기준 오후 3시 35분에 하루에 딱 한 번 실행되도록 설정된 값입니다.
+    - cron: '35 6 * * 1-5'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
-      # 1. 저장소 체크아웃
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # 1. 저장소 체크아웃
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # 2. 파이썬 환경 설정 (Python 3.10)
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+    # 2. 파이썬 환경 설정 (Python 3.10)
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-      # 3. 필수 라이브러리 설치 (requests, pandas, finance-datareader)
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install requests pandas finance-datareader
+    # 3. 필수 라이브러리 설치 (requests, pandas, finance-datareader)
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install requests pandas finance-datareader
 
-      # 4. 주식 헌터 스크립트 실행 (시각에 따라 봇 내부에서 자동으로 morning / intraday / close / monitor 분기 처리)
-      - name: Run Stock Hunter
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: |
-          python main.py
+    # 4. 주식 전략 스크리닝 실행
+    - name: Run Stock Hunter
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: |
+        python main.py
