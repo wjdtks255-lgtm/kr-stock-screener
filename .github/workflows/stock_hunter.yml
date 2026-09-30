@@ -1,4 +1,4 @@
-name: Korea Stock Hunter V3
+name: Korea Stock Hunter V4
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       mode:
         description: "Run mode"
         required: true
-        default: "monitor"
+        default: "morning"
         type: choice
         options:
           - morning
@@ -16,27 +16,19 @@ on:
       force_scan:
         description: "Force scan"
         required: true
-        default: false
+        default: true
         type: boolean
 
-  # ==========================================
-  # 장초
-  # 09:05 ~ 09:30
-  # ==========================================
   schedule:
+    # 장초 검색
     - cron: "5,10,15,20,25,30 9 * * 1-5"
       timezone: "Asia/Seoul"
 
-    # ==========================================
-    # 종가 후보
-    # 15:10 / 15:15 / 15:20
-    # ==========================================
+    # 종가 검색
     - cron: "10,15,20 15 * * 1-5"
       timezone: "Asia/Seoul"
 
-    # ==========================================
-    # 장중 포지션 모니터
-    # ==========================================
+    # 장중 모니터
     - cron: "35,40,45,50,55 9 * * 1-5"
       timezone: "Asia/Seoul"
 
@@ -51,54 +43,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-
   run:
     runs-on: ubuntu-latest
 
     timeout-minutes: 10
 
     steps:
-
-      # ==========================================
-      # CHECKOUT
-      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ==========================================
-      # PYTHON
-      # ==========================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ==========================================
-      # DEPENDENCIES
-      # ==========================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas lxml
+          python -m pip install requests pandas lxml beautifulsoup4
 
-      # ==========================================
-      # RUN BOT
-      # ==========================================
+      - name: Verify dependencies
+        run: |
+          python -c "import requests; print('requests OK')"
+          python -c "import pandas; print('pandas OK')"
+          python -c "import bs4; print('beautifulsoup4 OK')"
+
       - name: Run stock hunter
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-
           MODE: ${{ github.event.inputs.mode }}
-
           FORCE_SCAN: ${{ github.event.inputs.force_scan }}
-
         run: |
           python main.py
 
-      # ==========================================
-      # SAVE STATE
-      # ==========================================
       - name: Commit bot state
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
