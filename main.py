@@ -10,7 +10,7 @@ import FinanceDataReader as fdr
 
 
 # ============================================================
-# KOREA STOCK HUNTER V5.2 (Reason Added)
+# KOREA STOCK HUNTER V5.3 (Final Complete Version)
 # ============================================================
 
 KST = timezone(timedelta(hours=9))
@@ -20,17 +20,17 @@ MIN_PRICE = 1000
 MIN_TURNOVER = 200_000_000
 MAX_RESULTS = 5
 MIN_SCORE_MORNING = 55
+MIN_SCORE_INTRADAY = 60
 MIN_SCORE_CLOSE = 55
 REQUEST_SLEEP = 0.05
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 MODE_ENV = os.getenv("MODE", "").strip().lower()
-FORCE_SCAN = os.getenv("FORCE_SCAN", "false").lower() == "true"
 
 
 # ============================================================
-# STATE
+# STATE MANAGEMENT
 # ============================================================
 
 DEFAULT_STATE = {
@@ -66,7 +66,7 @@ def save_state(state):
 
 
 # ============================================================
-# TIME
+# TIME & AUTO MODE
 # ============================================================
 
 def now_kst():
@@ -75,21 +75,30 @@ def now_kst():
 
 def auto_mode():
     t = now_kst().strftime("%H:%M")
+    
+    # 1. 장초 (09:05 ~ 09:35)
     if "09:05" <= t <= "09:35":
         return "morning"
+    
+    # 2. 장마감 직전 (15:10 ~ 15:20)
     if "15:10" <= t <= "15:20":
         return "close"
+    
+    # 3. 장중 시간대 (09:35 ~ 15:10) -> 장중 실시간 스캔 + 모니터링
+    if "09:35" < t < "15:10":
+        return "intraday"
+
     return "monitor"
 
 
 def get_mode():
-    if MODE_ENV in ("morning", "close", "monitor"):
+    if MODE_ENV in ("morning", "intraday", "close", "monitor"):
         return MODE_ENV
     return auto_mode()
 
 
 # ============================================================
-# NUMBER
+# NUMBER & DATA PROCESSING
 # ============================================================
 
 def num(value, default=0.0):
@@ -105,10 +114,6 @@ def num(value, default=0.0):
     except Exception:
         return default
 
-
-# ============================================================
-# STOCK LISTING NORMALIZATION
-# ============================================================
 
 def normalize_listing(df):
     if df is None or df.empty:
@@ -131,8 +136,7 @@ def normalize_listing(df):
     bad_pattern = r"ETF|ETN|스팩|SPAC|리츠|REIT"
     result = result[~result["Name"].str.upper().str.contains(bad_pattern, na=False)]
 
-    result = result.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
-    return result[["Symbol", "Name", "Market"]]
+    return result.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)[["Symbol", "Name", "Market"]]
 
 
 def get_stock_listings():
@@ -140,7 +144,6 @@ def get_stock_listings():
     print("====================================")
     print(" STOCK LIST DOWNLOAD (KRX)")
     print("====================================")
-
     try:
         df = fdr.StockListing("KRX")
         normalized = normalize_listing(df)
@@ -224,27 +227,23 @@ def calculate_score(df, mode):
 
     if close > open_price:
         score += 10
-        reasons.append("시가 대비 양봉 마감")
+        reasons.append("양봉 마감")
 
     if high > low:
         position = (close - low) / (high - low)
         if position >= 0.85:
             score += 15
-            reasons.append("고가놀이 패턴 (상단 마감)")
+            reasons.append("고가놀이 패턴")
         elif position >= 0.70:
             score += 10
-            reasons.append("장중 강세 유지")
-        elif position >= 0.55:
-            score += 5
+            reasons.append("상단 지지")
 
-    if 1.0 <= change_pct <= 6.0:
+    if 1.0 <= change_pct <= 7.0:
         score += 15
-        reasons.append(f"적정 상승률({change_pct:+.2f}%)")
-    elif 0.3 <= change_pct < 1.0:
-        score += 8
-    elif 6.0 < change_pct <= 10.0:
-        score += 7
-        reasons.append(f"급등세 포착({change_pct:+.2f}%)")
+        reasons.append(f"상승세({change_pct:+.2f}%)")
+    elif 7.0 < change_pct <= 15.0:
+        score += 10
+        reasons.append(f"급등세({change_pct:+.2f}%)")
 
     closes = df["Close"]
     ma5 = num(closes.tail(5).mean())
@@ -255,13 +254,13 @@ def calculate_score(df, mode):
         reasons.append("20일선 위 안착")
     if ma5 > ma20:
         score += 10
-        reasons.append("단기 이평선 정배열")
+        reasons.append("이평선 정배열")
 
     if len(df) >= 21:
         previous_high = num(closes.iloc[-21:-1].max())
         if previous_high > 0 and close >= previous_high:
             score += 15
-            reasons.append("전고점 돌파 시도")
+            reasons.append("전고점 돌파")
 
     if len(df) >= 21:
         avg_volume = num(df["Volume"].iloc[-21:-1].mean())
@@ -269,12 +268,19 @@ def calculate_score(df, mode):
             volume_ratio = volume / avg_volume
             if volume_ratio >= 2.0:
                 score += 15
-                reasons.append(f"거래량 폭증 (평균 대비 {volume_ratio:.1f}배)")
-            elif volume_ratio >= 1.5:
+                reasons.append(f"거래량 폭증({volume_ratio:.1f}배)")
+            elif volume_ratio >= 1.4:
                 score += 10
-                reasons.append(f"거래량 증가 (평균 대비 {volume_ratio:.1f}배)")
-            elif volume_ratio >= 1.2:
-                score += 5
+                reasons.append(f"거래량 증가({volume_ratio:.1f}배)")
+
+    if mode == "intraday":
+        if volume_ratio >= 2.0:
+            score += 10
+        reasons.append("장중 수급 집중")
+    elif mode == "close":
+        if high > low and ((close - low) / (high - low)) >= 0.90:
+            score += 10
+            reasons.append("종가 고가 마감")
 
     reason_str = " | ".join(reasons) if reasons else "모멘텀 조건 충족"
 
@@ -288,13 +294,12 @@ def calculate_score(df, mode):
 
 
 # ============================================================
-# SCAN
+# SCANNER
 # ============================================================
 
 def scan_market(listing_df, mode):
     results = []
-    total = len(listing_df)
-    print(f"{mode.upper()} 검사 시작: {total}개")
+    print(f"{mode.upper()} 스캔 시작: 총 {len(listing_df)}개 중 검사")
 
     for index, row in listing_df.iterrows():
         code = str(row["Symbol"])
@@ -309,8 +314,13 @@ def scan_market(listing_df, mode):
         if result is None:
             continue
 
-        minimum_score = MIN_SCORE_MORNING if mode == "morning" else MIN_SCORE_CLOSE
-        if result["score"] < minimum_score:
+        min_score = (
+            MIN_SCORE_MORNING if mode == "morning" 
+            else MIN_SCORE_INTRADAY if mode == "intraday" 
+            else MIN_SCORE_CLOSE
+        )
+
+        if result["score"] < min_score:
             continue
 
         result.update({"code": code, "name": name, "market": market})
@@ -328,27 +338,23 @@ def scan_all(listings, mode):
     if listings.empty:
         return []
 
-    kospi = listings[listings["Market"].astype(str).str.upper().str.contains("KOSPI", na=False)].copy()
-    kosdaq = listings[listings["Market"].astype(str).str.upper().str.contains("KOSDAQ", na=False)].copy()
+    kospi = listings[listings["Market"].astype(str).str.upper().str.contains("KOSPI", na=False)].head(300)
+    kosdaq = listings[listings["Market"].astype(str).str.upper().str.contains("KOSDAQ", na=False)].head(300)
 
     if kospi.empty and kosdaq.empty:
         kospi = listings.head(300)
         kosdaq = listings.iloc[300:600]
-    else:
-        kospi = kospi.head(300)
-        kosdaq = kosdaq.head(300)
 
     results = []
     for market_df in [kospi, kosdaq]:
-        market_results = scan_market(market_df, mode)
-        results.extend(market_results)
+        results.extend(scan_market(market_df, mode))
 
     results.sort(key=lambda x: (x["score"], x["change_pct"], x["turnover"]), reverse=True)
     return results[:MAX_RESULTS]
 
 
 # ============================================================
-# TELEGRAM MESSAGE WITH REASON
+# TELEGRAM NOTIFICATIONS
 # ============================================================
 
 def telegram_send(message):
@@ -360,21 +366,20 @@ def telegram_send(message):
 
     try:
         response = requests.post(url, json=payload, timeout=15)
-        if response.ok:
-            return True
+        return response.ok
     except Exception as e:
         print("Telegram ERROR:", repr(e))
-    return False
+        return False
 
 
 def build_signal_message(results, mode):
-    if mode == "morning":
-        title = "🌅 <b>KOREA STOCK HUNTER V5.2</b>\n장초 상승 후보 (이유 포함)"
-        desc = "09:05~09:35 기준\n상승 모멘텀 조건을 만족한 종목"
-    else:
-        title = "🌙 <b>KOREA STOCK HUNTER V5.2</b>\n다음날 상승 후보 (이유 포함)"
-        desc = "15:10~15:20 기준\n다음 거래일 모멘텀 후보"
+    titles = {
+        "morning": ("🌅 <b>KOREA STOCK HUNTER V5.3</b>\n장초 상승 후보", "09:05~09:35 기준 상승 모멘텀"),
+        "intraday": ("☀️ <b>KOREA STOCK HUNTER V5.3</b>\n장중 실시간 급등/돌파 후보", "장중 수급 집중 및 돌파 종목"),
+        "close": ("🌙 <b>KOREA STOCK HUNTER V5.3</b>\n다음날 상승 후보", "15:10~15:20 기준 종가 모멘텀")
+    }
 
+    title, desc = titles.get(mode, ("📈 <b>STOCK HUNTER</b>", "모멘텀 스캔 결과"))
     lines = [title, desc, "", f"⏰ {now_kst().strftime('%Y-%m-%d %H:%M:%S')}", ""]
 
     if not results:
@@ -386,7 +391,6 @@ def build_signal_message(results, mode):
         change = r["change_pct"]
         score = r["score"]
         reason = r.get("reason", "조건 충족")
-        entry = price
         sl = price * 0.965
         tp1 = price * 1.03
         tp2 = price * 1.06
@@ -396,7 +400,7 @@ def build_signal_message(results, mode):
             f"시장: {r['market']} | Score: <b>{score}</b>",
             f"현재가: {price:,.0f}원 ({change:+.2f}%)",
             f"💡 <b>포착 사유:</b> {reason}",
-            f"ENTRY: {entry:,.0f} | SL: {sl:,.0f}",
+            f"ENTRY: {price:,.0f} | SL: {sl:,.0f}",
             f"TP1: {tp1:,.0f} | TP2: {tp2:,.0f}",
             ""
         ])
@@ -406,7 +410,7 @@ def build_signal_message(results, mode):
 
 
 # ============================================================
-# POSITION REGISTER & MONITOR
+# POSITIONS & MONITORING
 # ============================================================
 
 def register_positions(state, results):
@@ -414,16 +418,17 @@ def register_positions(state, results):
     for r in results:
         code = r["code"]
         price = r["close"]
-        positions[code] = {
-            "name": r["name"],
-            "market": r["market"],
-            "entry": price,
-            "sl": price * 0.965,
-            "tp1": price * 1.03,
-            "tp2": price * 1.06,
-            "tp1_sent": False,
-            "created_at": now_kst().isoformat()
-        }
+        if code not in positions:
+            positions[code] = {
+                "name": r["name"],
+                "market": r["market"],
+                "entry": price,
+                "sl": price * 0.965,
+                "tp1": price * 1.03,
+                "tp2": price * 1.06,
+                "tp1_sent": False,
+                "created_at": now_kst().isoformat()
+            }
 
 
 def monitor_positions(state):
@@ -458,6 +463,10 @@ def monitor_positions(state):
             pass
 
 
+# ============================================================
+# MAIN ENTRY
+# ============================================================
+
 def run_scan(mode):
     listings = get_stock_listings()
     if listings.empty:
@@ -479,12 +488,15 @@ def main():
     mode = get_mode()
     state = load_state()
 
-    if mode == "monitor":
-        monitor_positions(state)
-        state["last_run"] = now_kst().isoformat()
-        save_state(state)
-    elif mode in ("morning", "close"):
+    print(f"=== KOREA STOCK HUNTER V5.3 | Mode: {mode} | Time: {now_kst()} ===")
+
+    if mode in ("morning", "intraday", "close"):
         run_scan(mode)
+        monitor_positions(state)
+    else:
+        monitor_positions(state)
+
+    save_state(state)
 
 
 if __name__ == "__main__":
