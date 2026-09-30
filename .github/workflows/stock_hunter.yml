@@ -1,148 +1,106 @@
-name: Korea Stock Hunter V2
+name: Korea Stock Hunter V3
 
 on:
-
-  # =========================================================
-  # 수동 실행
-  # =========================================================
-
   workflow_dispatch:
-
     inputs:
-
       mode:
-        description: "Manual run mode"
+        description: "Run mode"
         required: true
         default: "monitor"
-
         type: choice
-
         options:
           - morning
           - close
           - monitor
 
+      force_scan:
+        description: "Force scan"
+        required: true
+        default: false
+        type: boolean
 
-  # =========================================================
-  # 자동 실행
-  # =========================================================
-
+  # ==========================================
+  # 장초
+  # 09:05 ~ 09:30
+  # ==========================================
   schedule:
-
-    # -------------------------------------------------------
-    # ① 장초 상승 후보
-    #
-    # 09:05
-    # 09:10
-    # 09:15
-    # 09:20
-    # 09:25
-    # 09:30
-    # -------------------------------------------------------
-
     - cron: "5,10,15,20,25,30 9 * * 1-5"
       timezone: "Asia/Seoul"
 
-
-    # -------------------------------------------------------
-    # ② 종가 매수 후보
-    #
-    # 15:10
-    # 15:15
-    # 15:20
-    # -------------------------------------------------------
-
+    # ==========================================
+    # 종가 후보
+    # 15:10 / 15:15 / 15:20
+    # ==========================================
     - cron: "10,15,20 15 * * 1-5"
       timezone: "Asia/Seoul"
 
-
-    # -------------------------------------------------------
-    # ③ 장중 포지션 감시
-    #
-    # 09:35 ~ 14:55
-    # -------------------------------------------------------
-
+    # ==========================================
+    # 장중 포지션 모니터
+    # ==========================================
     - cron: "35,40,45,50,55 9 * * 1-5"
       timezone: "Asia/Seoul"
 
     - cron: "0,5,10,15,20,25,30,35,40,45,50,55 10,11,12,13,14 * * 1-5"
       timezone: "Asia/Seoul"
 
+permissions:
+  contents: write
+
+concurrency:
+  group: korea-stock-hunter
+  cancel-in-progress: false
 
 jobs:
 
   run:
-
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write
+    timeout-minutes: 10
 
     steps:
 
-      # =====================================================
-      # 1. Repository
-      # =====================================================
-
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
       - name: Checkout
-
         uses: actions/checkout@v4
 
-
-      # =====================================================
-      # 2. Python
-      # =====================================================
-
+      # ==========================================
+      # PYTHON
+      # ==========================================
       - name: Setup Python
-
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.11"
 
-
-      # =====================================================
-      # 3. Dependencies
-      # =====================================================
-
+      # ==========================================
+      # DEPENDENCIES
+      # ==========================================
       - name: Install dependencies
-
         run: |
-
           python -m pip install --upgrade pip
+          pip install requests pandas lxml
 
-          pip install requests
-
-
-      # =====================================================
-      # 4. Run
-      # =====================================================
-
-      - name: Run Korea Stock Hunter
-
+      # ==========================================
+      # RUN BOT
+      # ==========================================
+      - name: Run stock hunter
         env:
-
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
           CHAT_ID: ${{ secrets.CHAT_ID }}
 
           MODE: ${{ github.event.inputs.mode }}
 
-        run: |
+          FORCE_SCAN: ${{ github.event.inputs.force_scan }}
 
+        run: |
           python main.py
 
-
-      # =====================================================
-      # 5. Save state
-      # =====================================================
-
+      # ==========================================
+      # SAVE STATE
+      # ==========================================
       - name: Commit bot state
-
         uses: stefanzweifel/git-auto-commit-action@v5
-
         with:
-
           commit_message: "Update stock hunter state"
-
           file_pattern: bot_state.json
