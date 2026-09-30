@@ -20,7 +20,9 @@ def load_positions():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             try:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
             except:
                 return {}
     return {}
@@ -36,7 +38,10 @@ def monitor_positions(start_date):
 
     updated_positions = {}
     for ticker, pos in positions.items():
-        # 이미 손절(STOP)이나 2차 목표가(TP2)로 종료된 종목은 아예 모니터링에서 제외하고 저장하지 않음 (중복 알림 원천 차단)
+        # 데이터 형식이 딕셔너리가 아니면 에러 방지를 위해 건너뜀
+        if not isinstance(pos, dict):
+            continue
+
         status = pos.get('status', 'ACTIVE')
         if status in ['STOP', 'TP2']:
             continue
@@ -51,17 +56,16 @@ def monitor_positions(start_date):
             high_price = latest['High']
             low_price = latest['Low']
             
-            name = pos['name']
-            tp1 = pos['target_1']
-            tp2 = pos['target_2']
-            sl = pos['stop_loss']
+            name = pos.get('name', ticker)
+            tp1 = pos.get('target_1', 0)
+            tp2 = pos.get('target_2', 0)
+            sl = pos.get('stop_loss', 0)
 
             # 1. 손절가 도달 체크
             if low_price <= sl:
                 msg = f"🔴 <b>STOP LOSS</b>\n📌 <b>{name}</b> <code>({ticker})</code>\n❌ 이탈 가격: <code>{int(sl):,}원 이하</code> (현재가 저가 기준)"
                 send_telegram(msg)
                 pos['status'] = 'STOP'
-                # STOP 상태가 된 종목은 updated_positions에 넣지 않아 다음부터는 검사조차 하지 않음
                 continue 
                 
             # 2. 2차 목표가 달성 체크
@@ -71,7 +75,7 @@ def monitor_positions(start_date):
                 pos['status'] = 'TP2'
                 continue 
                 
-            # 3. 1차 목표가 달성 체크 (중복 알림 방지)
+            # 3. 1차 목표가 달성 체크
             if high_price >= tp1 and not pos.get('tp1_hit', False):
                 msg = f"🎯 <b>1차 목표가(TP1) 달성</b>\n📌 <b>{name}</b> <code>({ticker})</code>\n✨ 달성 가격: <code>{int(tp1):,}원 도달!</code>"
                 send_telegram(msg)
@@ -87,7 +91,6 @@ def run_screener():
     now = datetime.now()
     start_date = (now - timedelta(days=60)).strftime('%Y-%m-%d')
     
-    # 1. 기존 포지션 모니터링 먼저 실행
     monitor_positions(start_date)
 
     print("=== [주도주 절대 거래대금 탑픽 스크리닝 시작] ===")
@@ -130,7 +133,7 @@ def run_screener():
 
     closing_signals = []  
     morning_signals = []  
-    new_positions = load_positions() # 현재 살아있는 포지션 불러오기
+    new_positions = load_positions() 
 
     for item in top_picks:
         ticker = item['ticker']
@@ -162,8 +165,8 @@ def run_screener():
         )
         morning_signals.append(morning_msg)
         
-        # 신규 포지션 등록 (이미 끝난 종목이 아니라 새로 포착된 종목만 활성화)
-        if new_positions.get(ticker, {}).get('status') not in ['ACTIVE']:
+        existing_pos = new_positions.get(ticker, {})
+        if not isinstance(existing_pos, dict) or existing_pos.get('status') not in ['ACTIVE']:
             new_positions[ticker] = {
                 "name": name,
                 "target_1": int(target_1),
