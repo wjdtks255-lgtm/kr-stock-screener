@@ -1,13 +1,17 @@
-name: Korea Stock Hunter V4
+name: Korea Stock Hunter V5
 
 on:
+
   workflow_dispatch:
+
     inputs:
+
       mode:
         description: "Run mode"
         required: true
         default: "morning"
         type: choice
+
         options:
           - morning
           - close
@@ -20,65 +24,142 @@ on:
         type: boolean
 
   schedule:
-    # 장초 검색
+
+    # ==========================================
+    # 장초
+    # KST 09:05 ~ 09:30
+    # ==========================================
+
     - cron: "5,10,15,20,25,30 9 * * 1-5"
       timezone: "Asia/Seoul"
 
-    # 종가 검색
+    # ==========================================
+    # 장마감 후보
+    # KST 15:10 / 15:15 / 15:20
+    # ==========================================
+
     - cron: "10,15,20 15 * * 1-5"
       timezone: "Asia/Seoul"
 
+    # ==========================================
     # 장중 모니터
+    # ==========================================
+
     - cron: "35,40,45,50,55 9 * * 1-5"
       timezone: "Asia/Seoul"
 
     - cron: "0,5,10,15,20,25,30,35,40,45,50,55 10,11,12,13,14 * * 1-5"
       timezone: "Asia/Seoul"
 
+
 permissions:
   contents: write
 
+
 concurrency:
+
   group: korea-stock-hunter
+
   cancel-in-progress: false
 
+
 jobs:
+
   run:
+
     runs-on: ubuntu-latest
 
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
+
+      # ==========================================
+      # CHECKOUT
+      # ==========================================
+
       - name: Checkout
+
         uses: actions/checkout@v4
 
+
+      # ==========================================
+      # PYTHON
+      # ==========================================
+
       - name: Setup Python
+
         uses: actions/setup-python@v5
+
         with:
           python-version: "3.11"
 
+
+      # ==========================================
+      # INSTALL
+      # ==========================================
+
       - name: Install dependencies
+
         run: |
+
           python -m pip install --upgrade pip
-          python -m pip install requests pandas lxml beautifulsoup4
+
+          python -m pip install \
+            requests \
+            pandas \
+            numpy \
+            lxml \
+            finance-datareader
+
+
+      # ==========================================
+      # VERIFY
+      # ==========================================
 
       - name: Verify dependencies
+
         run: |
+
           python -c "import requests; print('requests OK')"
+
           python -c "import pandas; print('pandas OK')"
-          python -c "import bs4; print('beautifulsoup4 OK')"
+
+          python -c "import numpy; print('numpy OK')"
+
+          python -c "import FinanceDataReader as fdr; print('FinanceDataReader OK:', fdr.__version__)"
+
+
+      # ==========================================
+      # RUN
+      # ==========================================
 
       - name: Run stock hunter
+
         env:
+
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
           CHAT_ID: ${{ secrets.CHAT_ID }}
+
           MODE: ${{ github.event.inputs.mode }}
+
           FORCE_SCAN: ${{ github.event.inputs.force_scan }}
+
         run: |
+
           python main.py
 
+
+      # ==========================================
+      # SAVE STATE
+      # ==========================================
+
       - name: Commit bot state
+
         uses: stefanzweifel/git-auto-commit-action@v5
+
         with:
-          commit_message: "Update stock hunter state"
+
+          commit_message: "Update Korea Stock Hunter V5 state"
+
           file_pattern: bot_state.json
