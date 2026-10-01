@@ -1,18 +1,13 @@
-name: Korea Stock Hunter V6.1
+name: Korea Stock Hunter V6.2
 
 on:
-
   workflow_dispatch:
-
     inputs:
-
       mode:
         description: "실행 모드"
         required: true
         default: "monitor"
-
         type: choice
-
         options:
           - morning
           - intraday
@@ -25,46 +20,21 @@ on:
         default: true
         type: boolean
 
-
   schedule:
 
-    # ==========================================
-    # 09:05 ~ 09:30
-    # 시초 상승 후보
-    # ==========================================
-
+    # 09:05 ~ 09:30 KST
     - cron: '5,10,15,20,25,30 0 * * 1-5'
 
-
-    # ==========================================
-    # 09:35 ~ 09:55
-    # 장초 상승 후보
-    # ==========================================
-
+    # 09:35 ~ 09:55 KST
     - cron: '35,40,45,50,55 0 * * 1-5'
 
-
-    # ==========================================
-    # 10:00 ~ 14:55
-    # 장중 상승 후보
-    # ==========================================
-
+    # 10:00 ~ 14:55 KST
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1,2,3,4,5 * * 1-5'
 
-
-    # ==========================================
-    # 15:00 / 15:05
-    # 장 마감 직전 장중 확인
-    # ==========================================
-
+    # 15:00 / 15:05 KST
     - cron: '0,5 6 * * 1-5'
 
-
-    # ==========================================
-    # 15:10 / 15:15 / 15:20
-    # 종가 후보
-    # ==========================================
-
+    # 15:10 / 15:15 / 15:20 KST
     - cron: '10,15,20 6 * * 1-5'
 
 
@@ -73,9 +43,7 @@ permissions:
 
 
 concurrency:
-
-  group: korea-stock-hunter-v61
-
+  group: korea-stock-hunter-v62
   cancel-in-progress: false
 
 
@@ -85,74 +53,80 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # ============================================
+      # CHECKOUT
+      # ============================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+      # ============================================
+      # PYTHON
+      # ============================================
 
-      with:
-        python-version: '3.11'
-
-
-    - name: Install dependencies
-
-      run: |
-
-        python -m pip install --upgrade pip
-
-        python -m pip install \
-          requests \
-          pandas \
-          numpy \
-          pytz \
-          lxml \
-          finance-datareader
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
 
-    - name: Verify dependencies
+      # ============================================
+      # DEPENDENCIES
+      # ============================================
 
-      run: |
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
 
-        python -c "import requests; print('requests OK')"
-
-        python -c "import pandas; print('pandas OK')"
-
-        python -c "import numpy; print('numpy OK')"
-
-        python -c "import pytz; print('pytz OK')"
-
-        python -c "import FinanceDataReader as fdr; print('FinanceDataReader OK')"
-
-
-    - name: Run Stock Hunter
-
-      env:
-
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
-        CHAT_ID: ${{ secrets.CHAT_ID }}
-
-        MODE: ${{ github.event.inputs.mode }}
-
-        FORCE_SCAN: ${{ github.event.inputs.force_scan }}
-
-      run: |
-
-        python main.py
+          python -m pip install \
+            requests \
+            pandas \
+            numpy \
+            pytz \
+            lxml \
+            finance-datareader
 
 
-    - name: Save position state
+      # ============================================
+      # VERIFY
+      # ============================================
 
-      uses: stefanzweifel/git-auto-commit-action@v5
+      - name: Verify dependencies
+        run: |
+          python -c "import requests; print('requests OK')"
+          python -c "import pandas; print('pandas OK')"
+          python -c "import numpy; print('numpy OK')"
+          python -c "import pytz; print('pytz OK')"
+          python -c "import FinanceDataReader as fdr; print('FinanceDataReader OK')"
 
-      with:
 
-        commit_message: "Update Korea Stock Hunter V6.1 state"
+      # ============================================
+      # RUN
+      # ============================================
 
-        file_pattern: active_positions.json
+      - name: Run Korea Stock Hunter
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+
+          MODE: ${{ github.event.inputs.mode }}
+          FORCE_SCAN: ${{ github.event.inputs.force_scan }}
+
+        run: |
+          python main.py
+
+
+      # ============================================
+      # SAVE STATE
+      # ============================================
+
+      - name: Save position state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update Korea Stock Hunter V6.2 state"
+          file_pattern: active_positions.json
