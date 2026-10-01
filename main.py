@@ -2,7 +2,6 @@ import os
 import json
 import time
 import requests
-import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import FinanceDataReader as fdr
@@ -10,82 +9,154 @@ import pytz
 
 
 # ============================================================
-# KOREA STOCK HUNTER V6
+# KOREA STOCK HUNTER V6.1
 # ============================================================
-# 1) 09:00 ~ 09:30  : 시초 상승 후보
-# 2) 09:35 ~ 15:00  : 장중 상승 후보
-# 3) 15:10 ~ 15:20  : 종가 후보
-# 4) 전체 시간       : 기존 포지션 TP / SL 추적
 #
-# DATA
-# - FinanceDataReader : 종목 목록 / 과거 가격
-# - Naver 공개 실시간 조회 : 현재가 / 등락률 / 거래량 등
+# 09:00 ~ 09:30  : 시초 상승 후보
+# 09:31 ~ 15:05  : 장중 상승 후보
+# 15:10 ~ 15:20  : 종가 후보
+# 항상            : 기존 포지션 TP / SL 추적
 #
-# STATE
-# - active_positions.json
+# 실시간 데이터
+# -> Naver 국내주식 종목별 realtime endpoint
+#
+# 과거 데이터
+# -> FinanceDataReader
 # ============================================================
 
 
-# =========================
-# 환경설정
-# =========================
+# ============================================================
+# ENV
+# ============================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+
+MODE_ENV = os.environ.get("MODE", "").strip().lower()
+FORCE_SCAN_ENV = os.environ.get("FORCE_SCAN", "").strip().lower()
 
 STATE_FILE = "active_positions.json"
 
 KST = pytz.timezone("Asia/Seoul")
 
-NAVER_REALTIME_URL = "https://polling.finance.naver.com/api/realtime"
 
-NAVER_CHART_URL = "https://finance.naver.com/item/main.naver?code={}"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
-    )
-}
-
-
-# =========================
-# 스크리닝 설정
-# =========================
+# ============================================================
+# SETTINGS
+# ============================================================
 
 UNIVERSE_SIZE = 350
 
-MIN_TURNOVER = 1_000_000_000
+HISTORY_DAYS = 90
 
-MORNING_MIN_GAP = 0.5
-MORNING_MAX_GAP = 7.0
-
-INTRADAY_MIN_CHANGE = 1.0
-
-CLOSE_MIN_CHANGE = 0.0
-
-MIN_VOLUME_RATIO = 1.30
+MIN_TURNOVER = 500_000_000
 
 TOP_SIGNAL_COUNT = 3
 
-HISTORY_DAYS = 90
+# 시초
+MORNING_MIN_CHANGE = 0.5
+MORNING_MAX_CHANGE = 7.0
 
+# 장중
+INTRADAY_MIN_CHANGE = 1.0
 
-# =========================
-# 포지션 설정
-# =========================
+# 종가
+CLOSING_MIN_CHANGE = 0.0
 
+# 포지션
 SL_PERCENT = 0.05
 TP1_PERCENT = 0.03
 TP2_PERCENT = 0.06
 
 
-# =========================
-# HTTP SESSION
-# =========================
+# ============================================================
+# NAVER
+# ============================================================
+
+NAVER_REALTIME_BASE = (
+    "https://polling.finance.naver.com"
+    "/api/realtime/domestic/stock/"
+)
+
+NAVER_CHART_URL = (
+    "https://finance.naver.com/item/main.naver?code={}"
+)
+
+
+HEADERS = {
+    "User-Agent":
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/131.0 Safari/537.36",
+
+    "Accept": "application/json,text/plain,*/*",
+
+    "Accept-Language":
+        "ko-KR,ko;q=0.9,en-US;q=0.8"
+}
+
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+
+# ============================================================
+# BASIC
+# ============================================================
+
+def now_kst():
+
+    return datetime.now(KST)
+
+
+def start_date():
+
+    return (
+        now_kst() -
+        timedelta(days=HISTORY_DAYS)
+    ).strftime("%Y-%m-%d")
+
+
+def to_float(value, default=0.0):
+
+    try:
+
+        if value is None:
+            return default
+
+        if isinstance(value, str):
+
+            value = (
+                value
+                .replace(",", "")
+                .replace("%", "")
+                .strip()
+            )
+
+        return float(value)
+
+    except Exception:
+
+        return default
+
+
+def to_int(value, default=0):
+
+    try:
+
+        return int(
+            round(
+                to_float(
+                    value,
+                    default
+                )
+            )
+        )
+
+    except Exception:
+
+        return default
 
 
 # ============================================================
@@ -93,12 +164,21 @@ SESSION.headers.update(HEADERS)
 # ============================================================
 
 def send_telegram(message):
+
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("텔레그램 환경변수가 없습니다.")
+
+        print(
+            "TELEGRAM ENV ERROR"
+        )
+
         print(message)
+
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
 
     payload = {
         "chat_id": CHAT_ID,
@@ -108,6 +188,7 @@ def send_telegram(message):
     }
 
     try:
+
         response = SESSION.post(
             url,
             data=payload,
@@ -115,16 +196,23 @@ def send_telegram(message):
         )
 
         if response.status_code != 200:
+
             print(
-                f"텔레그램 오류: "
-                f"{response.status_code} / {response.text[:300]}"
+                "Telegram error:",
+                response.status_code,
+                response.text[:300]
             )
+
             return False
 
         return True
 
     except Exception as e:
-        print(f"텔레그램 전송 실패: {e}")
+
+        print(
+            f"Telegram send failed: {e}"
+        )
+
         return False
 
 
@@ -135,9 +223,11 @@ def send_telegram(message):
 def load_positions():
 
     if not os.path.exists(STATE_FILE):
+
         return {}
 
     try:
+
         with open(
             STATE_FILE,
             "r",
@@ -146,18 +236,23 @@ def load_positions():
 
             data = json.load(f)
 
-            if isinstance(data, dict):
-                return data
+        if isinstance(data, dict):
+
+            return data
 
     except Exception as e:
-        print(f"STATE LOAD ERROR: {e}")
+
+        print(
+            f"STATE LOAD ERROR: {e}"
+        )
 
     return {}
 
 
-def save_positions(positions):
+def save_positions(data):
 
     try:
+
         with open(
             STATE_FILE,
             "w",
@@ -165,212 +260,249 @@ def save_positions(positions):
         ) as f:
 
             json.dump(
-                positions,
+                data,
                 f,
                 ensure_ascii=False,
                 indent=4
             )
 
     except Exception as e:
-        print(f"STATE SAVE ERROR: {e}")
 
-
-# ============================================================
-# 날짜
-# ============================================================
-
-def get_now():
-
-    return datetime.now(KST)
-
-
-def get_start_date():
-
-    return (
-        get_now() - timedelta(days=HISTORY_DAYS)
-    ).strftime("%Y-%m-%d")
-
-
-# ============================================================
-# 숫자 안전 변환
-# ============================================================
-
-def safe_float(value, default=0.0):
-
-    try:
-        if value is None:
-            return default
-
-        return float(value)
-
-    except Exception:
-        return default
-
-
-def safe_int(value, default=0):
-
-    try:
-        if value is None:
-            return default
-
-        return int(float(value))
-
-    except Exception:
-        return default
-
-
-# ============================================================
-# Naver 실시간 데이터
-# ============================================================
-
-def get_realtime_quotes(codes):
-
-    """
-    Naver 공개 실시간 조회.
-
-    return:
-    {
-        "005930": {
-            "price": ...,
-            "change": ...,
-            "volume": ...,
-            "amount": ...,
-            "open": ...,
-            "high": ...,
-            "low": ...,
-            "prev_close": ...
-        }
-    }
-    """
-
-    result = {}
-
-    if not codes:
-        return result
-
-    # 너무 긴 URL 방지
-    chunk_size = 50
-
-    for start in range(0, len(codes), chunk_size):
-
-        chunk = codes[start:start + chunk_size]
-
-        query = "|".join(
-            f"SERVICE_ITEM:{code}"
-            for code in chunk
+        print(
+            f"STATE SAVE ERROR: {e}"
         )
+
+
+# ============================================================
+# NAVER REALTIME
+# ============================================================
+
+def get_one_realtime(code, retry=2):
+
+    url = (
+        NAVER_REALTIME_BASE +
+        str(code).zfill(6)
+    )
+
+    for attempt in range(
+        retry + 1
+    ):
 
         try:
 
             response = SESSION.get(
-                NAVER_REALTIME_URL,
-                params={"query": query},
-                timeout=15
+                url,
+                timeout=7
             )
 
-            response.raise_for_status()
+            if response.status_code != 200:
+
+                print(
+                    f"[NAVER] {code} "
+                    f"HTTP {response.status_code}"
+                )
+
+                time.sleep(
+                    0.5
+                )
+
+                continue
 
             data = response.json()
 
-            datas = data.get("result", {}).get("areas", [])
+            datas = data.get(
+                "datas",
+                []
+            )
 
-            for area in datas:
+            if not datas:
 
-                items = area.get("datas", [])
+                time.sleep(
+                    0.5
+                )
 
-                for item in items:
+                continue
 
-                    code = str(
-                        item.get("cd", "")
-                    ).zfill(6)
+            d = datas[0]
 
-                    if not code:
-                        continue
+            price = to_float(
+                d.get("closePrice")
+            )
 
-                    price = safe_float(
-                        item.get("nv")
+            change = to_float(
+                d.get(
+                    "fluctuationsRatio"
+                )
+            )
+
+            # 일부 응답에서는 부호 없는 값이 올 수 있으므로
+            # compareToPreviousClosePrice도 확인
+            change_value = to_float(
+                d.get(
+                    "compareToPreviousClosePrice"
+                )
+            )
+
+            if change == 0 and change_value != 0:
+
+                prev = to_float(
+                    d.get(
+                        "previousClosePrice"
+                    )
+                )
+
+                if prev > 0:
+
+                    change = (
+                        change_value /
+                        prev *
+                        100
                     )
 
-                    change_rate = safe_float(
-                        item.get("cr")
-                    )
+            volume = to_float(
+                d.get(
+                    "accumulatedTradingVolume"
+                )
+            )
 
-                    volume = safe_float(
-                        item.get("aq")
-                    )
+            amount = to_float(
+                d.get(
+                    "accumulatedTradingValue"
+                )
+            )
 
-                    amount = safe_float(
-                        item.get("aa")
-                    )
+            open_price = to_float(
+                d.get(
+                    "openPrice"
+                )
+            )
 
-                    open_price = safe_float(
-                        item.get("op")
-                    )
+            high_price = to_float(
+                d.get(
+                    "highPrice"
+                )
+            )
 
-                    high_price = safe_float(
-                        item.get("hp")
-                    )
+            low_price = to_float(
+                d.get(
+                    "lowPrice"
+                )
+            )
 
-                    low_price = safe_float(
-                        item.get("lp")
-                    )
+            prev_close = to_float(
+                d.get(
+                    "previousClosePrice"
+                )
+            )
 
-                    prev_close = safe_float(
-                        item.get("pcv")
-                    )
+            market_status = d.get(
+                "marketStatus",
+                ""
+            )
 
-                    result[code] = {
-                        "price": price,
-                        "change": change_rate,
-                        "volume": volume,
-                        "amount": amount,
-                        "open": open_price,
-                        "high": high_price,
-                        "low": low_price,
-                        "prev_close": prev_close
-                    }
+            return {
+                "price": price,
+                "change": change,
+                "volume": volume,
+                "amount": amount,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "prev_close": prev_close,
+                "market_status": market_status
+            }
 
         except Exception as e:
 
-            print(
-                f"Naver 실시간 조회 실패: {e}"
+            if attempt >= retry:
+
+                print(
+                    f"[NAVER FAIL] {code}: {e}"
+                )
+
+            time.sleep(
+                0.5
             )
 
-        # API 부담 감소
-        time.sleep(0.15)
+    return None
+
+
+def get_realtime_quotes(codes):
+
+    result = {}
+
+    total = len(codes)
+
+    print(
+        f"실시간 시세 조회 시작: {total}개"
+    )
+
+    for index, code in enumerate(
+        codes,
+        start=1
+    ):
+
+        quote = get_one_realtime(
+            code
+        )
+
+        if quote:
+
+            result[code] = quote
+
+        # 지나치게 빠른 연속 요청 방지
+        time.sleep(0.08)
+
+        if index % 50 == 0:
+
+            print(
+                f"실시간 조회 진행: "
+                f"{index}/{total} "
+                f"성공 {len(result)}"
+            )
+
+    print(
+        f"실시간 데이터: "
+        f"{len(result)}/{total}개"
+    )
 
     return result
 
 
 # ============================================================
-# KRX 종목 목록
+# KRX UNIVERSE
 # ============================================================
 
 def get_universe():
 
-    print("KRX 종목 목록 다운로드...")
+    print(
+        "KRX 종목 목록 다운로드..."
+    )
 
     try:
 
-        df = fdr.StockListing("KRX")
+        df = fdr.StockListing(
+            "KRX"
+        )
 
         if df is None or df.empty:
-            print("KRX 목록이 비어 있습니다.")
+
             return pd.DataFrame()
 
-        required = ["Code", "Name"]
+        if (
+            "Code" not in df.columns
+            or
+            "Name" not in df.columns
+        ):
 
-        for col in required:
+            print(
+                "KRX Code / Name 컬럼 없음"
+            )
 
-            if col not in df.columns:
+            return pd.DataFrame()
 
-                print(
-                    f"KRX 목록에 {col} 컬럼 없음"
-                )
+        df = df.copy()
 
-                return pd.DataFrame()
-
-        # 숫자형 거래대금이 있으면 우선 사용
         if "Amount" in df.columns:
 
             df["Amount"] = pd.to_numeric(
@@ -383,17 +515,23 @@ def get_universe():
                 ascending=False
             )
 
-        # 거래대금 정보가 없는 경우 종목 수 기준
-        df = df.head(UNIVERSE_SIZE).copy()
+        df = df.head(
+            UNIVERSE_SIZE
+        )
 
         df["Code"] = (
             df["Code"]
             .astype(str)
-            .str.extract(r"(\d{6})")[0]
+            .str.extract(
+                r"(\d{6})"
+            )[0]
         )
 
         df = df.dropna(
-            subset=["Code", "Name"]
+            subset=[
+                "Code",
+                "Name"
+            ]
         )
 
         df = df.drop_duplicates(
@@ -401,7 +539,8 @@ def get_universe():
         )
 
         print(
-            f"KRX universe: {len(df)}개"
+            f"KRX universe: "
+            f"{len(df)}개"
         )
 
         return df
@@ -409,29 +548,31 @@ def get_universe():
     except Exception as e:
 
         print(
-            f"KRX 목록 다운로드 실패: {e}"
+            f"KRX 목록 오류: {e}"
         )
 
         return pd.DataFrame()
 
 
 # ============================================================
-# 과거 데이터
+# HISTORY
 # ============================================================
 
-def get_history(code, start_date):
+def get_history(
+    code,
+    begin
+):
 
     try:
 
         df = fdr.DataReader(
             code,
-            start_date
+            begin
         )
 
         if df is None or df.empty:
-            return None
 
-        df = df.copy()
+            return None
 
         required = [
             "Open",
@@ -441,13 +582,14 @@ def get_history(code, start_date):
             "Volume"
         ]
 
-        for col in required:
+        for column in required:
 
-            if col not in df.columns:
+            if column not in df.columns:
+
                 return None
 
-            df[col] = pd.to_numeric(
-                df[col],
+            df[column] = pd.to_numeric(
+                df[column],
                 errors="coerce"
             )
 
@@ -456,6 +598,7 @@ def get_history(code, start_date):
         )
 
         if len(df) < 25:
+
             return None
 
         return df
@@ -466,7 +609,7 @@ def get_history(code, start_date):
 
 
 # ============================================================
-# 기술지표
+# METRICS
 # ============================================================
 
 def calculate_metrics(df):
@@ -500,35 +643,35 @@ def calculate_metrics(df):
 
     latest = data.iloc[-1]
 
-    close = safe_float(
+    close = to_float(
         latest["Close"]
     )
 
-    high = safe_float(
+    high = to_float(
         latest["High"]
     )
 
-    low = safe_float(
+    low = to_float(
         latest["Low"]
     )
 
-    volume = safe_float(
+    volume = to_float(
         latest["Volume"]
     )
 
-    ma5 = safe_float(
+    ma5 = to_float(
         latest["MA5"]
     )
 
-    ma20 = safe_float(
+    ma20 = to_float(
         latest["MA20"]
     )
 
-    vol20 = safe_float(
+    vol20 = to_float(
         latest["VOL20"]
     )
 
-    high20 = safe_float(
+    high20 = to_float(
         latest["HIGH20"]
     )
 
@@ -543,57 +686,27 @@ def calculate_metrics(df):
 
         close_position = 0.5
 
-    if vol20 > 0:
-
-        volume_ratio = (
-            volume / vol20
-        )
-
-    else:
-
-        volume_ratio = 0
-
-    if len(data) >= 2:
-
-        prev_close = safe_float(
-            data.iloc[-2]["Close"]
-        )
-
-        daily_change = (
-            (close - prev_close) /
-            prev_close * 100
-            if prev_close > 0
-            else 0
-        )
-
-    else:
-
-        daily_change = 0
-
-    high20_distance = 0
-
-    if high20 > 0:
-
-        high20_distance = (
-            (close / high20 - 1)
-            * 100
-        )
+    volume_ratio = (
+        volume / vol20
+        if vol20 > 0
+        else 0
+    )
 
     return {
         "close": close,
+        "high": high,
+        "low": low,
         "ma5": ma5,
         "ma20": ma20,
         "volume": volume,
         "volume_ratio": volume_ratio,
         "close_position": close_position,
-        "daily_change": daily_change,
-        "high20": high20,
-        "high20_distance": high20_distance
+        "high20": high20
     }
 
 
 # ============================================================
-# 오전 시초 후보 점수
+# MORNING SCORE
 # ============================================================
 
 def morning_score(
@@ -604,48 +717,56 @@ def morning_score(
     score = 0
 
     change = quote["change"]
-    volume_ratio = metrics["volume_ratio"]
-    ma5 = metrics["ma5"]
-    ma20 = metrics["ma20"]
-    close_position = metrics["close_position"]
 
-    # 갭 상승
-    if change >= 0.5:
-        score += 1
+    if (
+        MORNING_MIN_CHANGE
+        <= change
+        <= MORNING_MAX_CHANGE
+    ):
 
-    if change >= 1.5:
-        score += 1
-
-    if change >= 3.0:
-        score += 1
-
-    # 과도한 추격 방지
-    if change > MORNING_MAX_GAP:
-        score -= 2
-
-    # 이동평균
-    if ma5 > ma20:
         score += 2
 
-    # 거래량
-    if volume_ratio >= 1.3:
+    if change >= 1.5:
+
         score += 1
 
-    if volume_ratio >= 2.0:
+    if change >= 3:
+
         score += 1
 
-    # 캔들 상단
-    if close_position >= 0.65:
+    if (
+        metrics["ma5"]
+        > metrics["ma20"]
+    ):
+
+        score += 2
+
+    if (
+        metrics["volume_ratio"]
+        >= 1.3
+    ):
+
         score += 1
 
-    if close_position >= 0.85:
+    if (
+        metrics["volume_ratio"]
+        >= 2
+    ):
+
+        score += 1
+
+    if (
+        metrics["close_position"]
+        >= 0.7
+    ):
+
         score += 1
 
     return score
 
 
 # ============================================================
-# 장중 후보 점수
+# INTRADAY SCORE
 # ============================================================
 
 def intraday_score(
@@ -658,38 +779,59 @@ def intraday_score(
     change = quote["change"]
 
     if change >= 1:
+
         score += 1
 
     if change >= 2:
+
         score += 1
 
     if change >= 4:
+
         score += 1
 
-    if metrics["ma5"] > metrics["ma20"]:
+    if (
+        metrics["ma5"]
+        > metrics["ma20"]
+    ):
+
         score += 2
 
-    if metrics["volume_ratio"] >= 1.3:
+    if (
+        metrics["volume_ratio"]
+        >= 1.3
+    ):
+
         score += 1
 
-    if metrics["volume_ratio"] >= 2:
+    if (
+        metrics["volume_ratio"]
+        >= 2
+    ):
+
         score += 1
 
-    if metrics["close_position"] >= 0.7:
+    if (
+        metrics["close_position"]
+        >= 0.7
+    ):
+
         score += 1
 
     if (
         metrics["high20"] > 0
-        and metrics["close"]
+        and
+        metrics["close"]
         >= metrics["high20"] * 0.98
     ):
+
         score += 2
 
     return score
 
 
 # ============================================================
-# 종가 후보 점수
+# CLOSING SCORE
 # ============================================================
 
 def closing_score(
@@ -701,270 +843,106 @@ def closing_score(
 
     change = quote["change"]
 
-    # 당일 상승
     if change > 0:
+
         score += 1
 
     if change >= 1:
+
         score += 1
 
     if change >= 3:
+
         score += 1
 
-    # 추세
-    if metrics["ma5"] > metrics["ma20"]:
+    if (
+        metrics["ma5"]
+        > metrics["ma20"]
+    ):
+
         score += 2
 
-    if metrics["close"] > metrics["ma20"]:
+    if (
+        metrics["close"]
+        > metrics["ma20"]
+    ):
+
         score += 1
 
-    # 거래량
-    if metrics["volume_ratio"] >= 1.3:
+    if (
+        metrics["volume_ratio"]
+        >= 1.3
+    ):
+
         score += 1
 
-    if metrics["volume_ratio"] >= 2.0:
+    if (
+        metrics["volume_ratio"]
+        >= 2
+    ):
+
         score += 1
 
-    if metrics["volume_ratio"] >= 3.0:
+    if (
+        metrics["volume_ratio"]
+        >= 3
+    ):
+
         score += 1
 
-    # 종가가 당일 고가에 가까운지
-    if metrics["close_position"] >= 0.70:
+    if (
+        metrics["close_position"]
+        >= 0.7
+    ):
+
         score += 1
 
-    if metrics["close_position"] >= 0.90:
+    if (
+        metrics["close_position"]
+        >= 0.9
+    ):
+
         score += 1
 
-    # 20일 고점 돌파 근접
     if (
         metrics["high20"] > 0
-        and metrics["close"]
+        and
+        metrics["close"]
         >= metrics["high20"] * 0.98
     ):
+
         score += 2
 
     if (
         metrics["high20"] > 0
-        and metrics["close"]
+        and
+        metrics["close"]
         > metrics["high20"]
     ):
+
         score += 1
 
     return score
 
 
 # ============================================================
-# 포지션 생성
-# ============================================================
-
-def create_position(
-    ticker,
-    name,
-    entry,
-    mode
-):
-
-    stop_loss = round(
-        entry * (1 - SL_PERCENT),
-        -1
-    )
-
-    target_1 = round(
-        entry * (1 + TP1_PERCENT),
-        -1
-    )
-
-    target_2 = round(
-        entry * (1 + TP2_PERCENT),
-        -1
-    )
-
-    return {
-        "name": name,
-        "entry": int(entry),
-        "target_1": int(target_1),
-        "target_2": int(target_2),
-        "stop_loss": int(stop_loss),
-        "tp1_hit": False,
-        "status": "ACTIVE",
-        "mode": mode,
-        "created_at": get_now().isoformat()
-    }
-
-
-# ============================================================
-# 기존 포지션 모니터링
-# ============================================================
-
-def monitor_positions(
-    quotes
-):
-
-    positions = load_positions()
-
-    if not positions:
-
-        print("추적 중인 포지션 없음")
-        return positions
-
-    print(
-        f"기존 포지션 {len(positions)}개 모니터링"
-    )
-
-    updated = {}
-
-    for ticker, pos in positions.items():
-
-        if not isinstance(pos, dict):
-            continue
-
-        status = pos.get(
-            "status",
-            "ACTIVE"
-        )
-
-        if status != "ACTIVE":
-            continue
-
-        quote = quotes.get(
-            ticker
-        )
-
-        if not quote:
-
-            updated[ticker] = pos
-            continue
-
-        current = safe_float(
-            quote.get("price")
-        )
-
-        if current <= 0:
-
-            updated[ticker] = pos
-            continue
-
-        name = pos.get(
-            "name",
-            ticker
-        )
-
-        entry = safe_float(
-            pos.get("entry")
-        )
-
-        sl = safe_float(
-            pos.get("stop_loss")
-        )
-
-        tp1 = safe_float(
-            pos.get("target_1")
-        )
-
-        tp2 = safe_float(
-            pos.get("target_2")
-        )
-
-        # ------------------------------------------------
-        # 손절
-        # ------------------------------------------------
-
-        if current <= sl:
-
-            send_telegram(
-                f"🔴 <b>[주식 손절]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📌 <b>{name}</b> "
-                f"<code>({ticker})</code>\n"
-                f"💰 현재가: "
-                f"<code>{int(current):,}원</code>\n"
-                f"❌ 손절가: "
-                f"<code>{int(sl):,}원</code>\n"
-                f"📉 진입가: "
-                f"<code>{int(entry):,}원</code>"
-            )
-
-            pos["status"] = "STOP"
-            continue
-
-        # ------------------------------------------------
-        # TP2
-        # ------------------------------------------------
-
-        if current >= tp2:
-
-            send_telegram(
-                f"🎯 <b>[주식 TP2 달성]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📌 <b>{name}</b> "
-                f"<code>({ticker})</code>\n"
-                f"💰 현재가: "
-                f"<code>{int(current):,}원</code>\n"
-                f"🎯 TP2: "
-                f"<code>{int(tp2):,}원</code>\n"
-                f"🔥 목표가 2차 도달"
-            )
-
-            pos["status"] = "TP2"
-            continue
-
-        # ------------------------------------------------
-        # TP1
-        # ------------------------------------------------
-
-        if (
-            current >= tp1
-            and not pos.get(
-                "tp1_hit",
-                False
-            )
-        ):
-
-            send_telegram(
-                f"🎯 <b>[주식 TP1 달성]</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📌 <b>{name}</b> "
-                f"<code>({ticker})</code>\n"
-                f"💰 현재가: "
-                f"<code>{int(current):,}원</code>\n"
-                f"🎯 TP1: "
-                f"<code>{int(tp1):,}원</code>\n"
-                f"✨ 1차 목표가 도달\n"
-                f"🛡️ 추적 상태 유지"
-            )
-
-            pos["tp1_hit"] = True
-
-            # TP1 달성 후 SL을 진입가로 올림
-            if entry > 0:
-
-                pos["stop_loss"] = int(
-                    round(entry, -1)
-                )
-
-        updated[ticker] = pos
-
-    save_positions(updated)
-
-    return updated
-
-
-# ============================================================
-# 오전 09:00~09:30
+# MORNING SCAN
 # ============================================================
 
 def scan_morning(
     universe,
     quotes,
-    start_date
+    begin
 ):
 
     print(
         "===================================="
     )
+
     print(
         " MORNING OPEN SCAN"
     )
+
     print(
         "===================================="
     )
@@ -973,11 +951,11 @@ def scan_morning(
 
     for _, row in universe.iterrows():
 
-        ticker = row["Code"]
+        code = row["Code"]
         name = row["Name"]
 
         quote = quotes.get(
-            ticker
+            code
         )
 
         if not quote:
@@ -991,24 +969,31 @@ def scan_morning(
             continue
 
         if (
-            change < MORNING_MIN_GAP
-            or change > MORNING_MAX_GAP
+            change < MORNING_MIN_CHANGE
+            or
+            change > MORNING_MAX_CHANGE
         ):
+
             continue
 
-        if amount > 0 and amount < MIN_TURNOVER:
+        if (
+            amount > 0
+            and
+            amount < MIN_TURNOVER
+        ):
+
             continue
 
-        df = get_history(
-            ticker,
-            start_date
+        history = get_history(
+            code,
+            begin
         )
 
-        if df is None:
+        if history is None:
             continue
 
         metrics = calculate_metrics(
-            df
+            history
         )
 
         score = morning_score(
@@ -1019,18 +1004,16 @@ def scan_morning(
         if score < 6:
             continue
 
-        candidates.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "price": price,
-                "change": change,
-                "amount": amount,
-                "score": score,
-                "volume_ratio":
-                    metrics["volume_ratio"]
-            }
-        )
+        candidates.append({
+            "ticker": code,
+            "name": name,
+            "price": price,
+            "change": change,
+            "amount": amount,
+            "score": score,
+            "volume_ratio":
+                metrics["volume_ratio"]
+        })
 
     candidates.sort(
         key=lambda x: (
@@ -1041,25 +1024,34 @@ def scan_morning(
         reverse=True
     )
 
-    return candidates[:TOP_SIGNAL_COUNT]
+    print(
+        f"Morning candidates: "
+        f"{len(candidates)}"
+    )
+
+    return candidates[
+        :TOP_SIGNAL_COUNT
+    ]
 
 
 # ============================================================
-# 장중
+# INTRADAY SCAN
 # ============================================================
 
 def scan_intraday(
     universe,
     quotes,
-    start_date
+    begin
 ):
 
     print(
         "===================================="
     )
+
     print(
         " INTRADAY RISING SCAN"
     )
+
     print(
         "===================================="
     )
@@ -1068,11 +1060,11 @@ def scan_intraday(
 
     for _, row in universe.iterrows():
 
-        ticker = row["Code"]
+        code = row["Code"]
         name = row["Name"]
 
         quote = quotes.get(
-            ticker
+            code
         )
 
         if not quote:
@@ -1088,19 +1080,24 @@ def scan_intraday(
         if change < INTRADAY_MIN_CHANGE:
             continue
 
-        if amount > 0 and amount < MIN_TURNOVER:
+        if (
+            amount > 0
+            and
+            amount < MIN_TURNOVER
+        ):
+
             continue
 
-        df = get_history(
-            ticker,
-            start_date
+        history = get_history(
+            code,
+            begin
         )
 
-        if df is None:
+        if history is None:
             continue
 
         metrics = calculate_metrics(
-            df
+            history
         )
 
         score = intraday_score(
@@ -1111,18 +1108,16 @@ def scan_intraday(
         if score < 7:
             continue
 
-        candidates.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "price": price,
-                "change": change,
-                "amount": amount,
-                "score": score,
-                "volume_ratio":
-                    metrics["volume_ratio"]
-            }
-        )
+        candidates.append({
+            "ticker": code,
+            "name": name,
+            "price": price,
+            "change": change,
+            "amount": amount,
+            "score": score,
+            "volume_ratio":
+                metrics["volume_ratio"]
+        })
 
     candidates.sort(
         key=lambda x: (
@@ -1133,25 +1128,34 @@ def scan_intraday(
         reverse=True
     )
 
-    return candidates[:TOP_SIGNAL_COUNT]
+    print(
+        f"Intraday candidates: "
+        f"{len(candidates)}"
+    )
+
+    return candidates[
+        :TOP_SIGNAL_COUNT
+    ]
 
 
 # ============================================================
-# 종가 15:10~15:20
+# CLOSING SCAN
 # ============================================================
 
 def scan_closing(
     universe,
     quotes,
-    start_date
+    begin
 ):
 
     print(
         "===================================="
     )
+
     print(
         " CLOSING BET SCAN"
     )
+
     print(
         "===================================="
     )
@@ -1160,11 +1164,11 @@ def scan_closing(
 
     for _, row in universe.iterrows():
 
-        ticker = row["Code"]
+        code = row["Code"]
         name = row["Name"]
 
         quote = quotes.get(
-            ticker
+            code
         )
 
         if not quote:
@@ -1177,23 +1181,48 @@ def scan_closing(
         if price <= 0:
             continue
 
-        if change < CLOSE_MIN_CHANGE:
+        if change < CLOSING_MIN_CHANGE:
             continue
 
-        if amount > 0 and amount < MIN_TURNOVER:
+        if (
+            amount > 0
+            and
+            amount < MIN_TURNOVER
+        ):
+
             continue
 
-        df = get_history(
-            ticker,
-            start_date
+        history = get_history(
+            code,
+            begin
         )
 
-        if df is None:
+        if history is None:
             continue
 
         metrics = calculate_metrics(
-            df
+            history
         )
+
+        # 실시간 가격으로 현재 종가 위치를 보정
+        realtime_high = quote["high"]
+        realtime_low = quote["low"]
+
+        if realtime_high > realtime_low:
+
+            realtime_position = (
+                (price - realtime_low) /
+                (
+                    realtime_high -
+                    realtime_low
+                )
+            )
+
+            metrics["close_position"] = (
+                realtime_position
+            )
+
+        metrics["close"] = price
 
         score = closing_score(
             quote,
@@ -1203,22 +1232,18 @@ def scan_closing(
         if score < 8:
             continue
 
-        candidates.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "price": price,
-                "change": change,
-                "amount": amount,
-                "score": score,
-                "volume_ratio":
-                    metrics["volume_ratio"],
-                "close_position":
-                    metrics["close_position"],
-                "high20_distance":
-                    metrics["high20_distance"]
-            }
-        )
+        candidates.append({
+            "ticker": code,
+            "name": name,
+            "price": price,
+            "change": change,
+            "amount": amount,
+            "score": score,
+            "volume_ratio":
+                metrics["volume_ratio"],
+            "close_position":
+                metrics["close_position"]
+        })
 
     candidates.sort(
         key=lambda x: (
@@ -1229,11 +1254,231 @@ def scan_closing(
         reverse=True
     )
 
-    return candidates[:TOP_SIGNAL_COUNT]
+    print(
+        f"Closing candidates: "
+        f"{len(candidates)}"
+    )
+
+    return candidates[
+        :TOP_SIGNAL_COUNT
+    ]
 
 
 # ============================================================
-# 알림 + 포지션 저장
+# POSITION
+# ============================================================
+
+def create_position(
+    ticker,
+    name,
+    entry,
+    mode
+):
+
+    stop_loss = round(
+        entry * (
+            1 - SL_PERCENT
+        ),
+        -1
+    )
+
+    target_1 = round(
+        entry * (
+            1 + TP1_PERCENT
+        ),
+        -1
+    )
+
+    target_2 = round(
+        entry * (
+            1 + TP2_PERCENT
+        ),
+        -1
+    )
+
+    return {
+        "name": name,
+        "entry": int(entry),
+        "target_1": int(target_1),
+        "target_2": int(target_2),
+        "stop_loss": int(stop_loss),
+        "tp1_hit": False,
+        "status": "ACTIVE",
+        "mode": mode,
+        "created_at":
+            now_kst().isoformat()
+    }
+
+
+# ============================================================
+# POSITION MONITOR
+# ============================================================
+
+def monitor_positions(
+    quotes
+):
+
+    positions = load_positions()
+
+    if not positions:
+
+        print(
+            "기존 포지션 없음"
+        )
+
+        return
+
+    print(
+        f"기존 포지션 "
+        f"{len(positions)}개 모니터링"
+    )
+
+    updated = {}
+
+    for ticker, pos in positions.items():
+
+        if not isinstance(
+            pos,
+            dict
+        ):
+
+            continue
+
+        if pos.get(
+            "status",
+            "ACTIVE"
+        ) != "ACTIVE":
+
+            continue
+
+        quote = quotes.get(
+            ticker
+        )
+
+        if not quote:
+
+            updated[ticker] = pos
+
+            continue
+
+        current = quote["price"]
+
+        if current <= 0:
+
+            updated[ticker] = pos
+
+            continue
+
+        name = pos.get(
+            "name",
+            ticker
+        )
+
+        entry = to_float(
+            pos.get("entry")
+        )
+
+        sl = to_float(
+            pos.get("stop_loss")
+        )
+
+        tp1 = to_float(
+            pos.get("target_1")
+        )
+
+        tp2 = to_float(
+            pos.get("target_2")
+        )
+
+        # ==========================================
+        # STOP
+        # ==========================================
+
+        if current <= sl:
+
+            send_telegram(
+                f"🔴 <b>[주식 STOP LOSS]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>{name}</b> "
+                f"<code>({ticker})</code>\n"
+                f"💰 현재가: "
+                f"<code>{int(current):,}원</code>\n"
+                f"❌ SL: "
+                f"<code>{int(sl):,}원</code>\n"
+                f"📌 진입가: "
+                f"<code>{int(entry):,}원</code>"
+            )
+
+            pos["status"] = "STOP"
+
+            continue
+
+        # ==========================================
+        # TP2
+        # ==========================================
+
+        if current >= tp2:
+
+            send_telegram(
+                f"🎯 <b>[주식 TP2 달성]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>{name}</b> "
+                f"<code>({ticker})</code>\n"
+                f"💰 현재가: "
+                f"<code>{int(current):,}원</code>\n"
+                f"🎯 TP2: "
+                f"<code>{int(tp2):,}원</code>"
+            )
+
+            pos["status"] = "TP2"
+
+            continue
+
+        # ==========================================
+        # TP1
+        # ==========================================
+
+        if (
+            current >= tp1
+            and
+            not pos.get(
+                "tp1_hit",
+                False
+            )
+        ):
+
+            send_telegram(
+                f"🎯 <b>[주식 TP1 달성]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>{name}</b> "
+                f"<code>({ticker})</code>\n"
+                f"💰 현재가: "
+                f"<code>{int(current):,}원</code>\n"
+                f"🎯 TP1: "
+                f"<code>{int(tp1):,}원</code>\n"
+                f"🛡️ SL → 진입가 이동"
+            )
+
+            pos["tp1_hit"] = True
+
+            if entry > 0:
+
+                pos["stop_loss"] = int(
+                    round(
+                        entry,
+                        -1
+                    )
+                )
+
+        updated[ticker] = pos
+
+    save_positions(
+        updated
+    )
+
+
+# ============================================================
+# SEND CANDIDATES
 # ============================================================
 
 def send_candidates(
@@ -1260,34 +1505,33 @@ def send_candidates(
         ticker = item["ticker"]
         name = item["name"]
 
-        entry = safe_float(
+        entry = to_float(
             item["price"]
         )
 
-        stop_loss = round(
-            entry * (1 - SL_PERCENT),
-            -1
-        )
-
-        target_1 = round(
-            entry * (1 + TP1_PERCENT),
-            -1
-        )
-
-        target_2 = round(
-            entry * (1 + TP2_PERCENT),
-            -1
-        )
-
-        amount_text = (
-            f"{item['amount'] / 100000000:,.1f}억원"
-            if item["amount"] > 0
-            else "-"
-        )
-
-        chart_link = NAVER_CHART_URL.format(
+        chart = NAVER_CHART_URL.format(
             ticker
         )
+
+        amount = item["amount"]
+
+        if amount >= 100_000_000:
+
+            amount_text = (
+                f"{amount / 100_000_000:,.1f}"
+                f"억원"
+            )
+
+        elif amount > 0:
+
+            amount_text = (
+                f"{amount / 10_000:,.0f}"
+                f"만원"
+            )
+
+        else:
+
+            amount_text = "-"
 
         message = (
             f"📌 <b>{name}</b> "
@@ -1306,30 +1550,56 @@ def send_candidates(
 
         if mode == "closing":
 
+            stop_loss = round(
+                entry * (
+                    1 - SL_PERCENT
+                ),
+                -1
+            )
+
+            target_1 = round(
+                entry * (
+                    1 + TP1_PERCENT
+                ),
+                -1
+            )
+
+            target_2 = round(
+                entry * (
+                    1 + TP2_PERCENT
+                ),
+                -1
+            )
+
             message += (
                 f"\n\n"
-                f"🟢 진입 기준: "
+                f"🟢 <b>진입 기준</b>: "
                 f"<code>{int(entry):,}원</code>\n"
-                f"🛡️ 손절 SL: "
+                f"🛡️ <b>SL</b>: "
                 f"<code>{int(stop_loss):,}원</code>\n"
-                f"🎯 TP1: "
+                f"🎯 <b>TP1</b>: "
                 f"<code>{int(target_1):,}원</code>\n"
-                f"🎯 TP2: "
+                f"🎯 <b>TP2</b>: "
                 f"<code>{int(target_2):,}원</code>"
             )
 
         message += (
             f"\n🔗 "
-            f"<a href='{chart_link}'>네이버 차트</a>"
+            f"<a href='{chart}'>네이버 차트</a>"
         )
 
         messages.append(
             message
         )
 
-        # 종가 후보만 추적
+        # ==========================================
+        # 종가 후보만 포지션 등록
+        # ==========================================
+
         if save_position:
 
+            # 같은 날 이미 등록된 종목은
+            # 새 포지션으로 덮어씀
             positions[ticker] = create_position(
                 ticker,
                 name,
@@ -1338,8 +1608,8 @@ def send_candidates(
             )
 
     header = (
-        f"{title}\n"
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        title +
+        "\n━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
     send_telegram(
@@ -1355,57 +1625,95 @@ def send_candidates(
 
 
 # ============================================================
-# 실행 모드
+# MODE
 # ============================================================
 
 def get_mode():
 
-    manual_mode = os.environ.get(
-        "MODE",
-        ""
-    ).strip().lower()
+    # ------------------------------------------
+    # 수동 실행
+    # ------------------------------------------
 
-    force_scan = os.environ.get(
-        "FORCE_SCAN",
-        ""
-    ).lower()
-
-    if manual_mode in {
-        "morning",
-        "intraday",
-        "close",
-        "monitor"
-    }:
-
-        if force_scan in {
+    if (
+        MODE_ENV
+        in {
+            "morning",
+            "intraday",
+            "close",
+            "monitor"
+        }
+        and
+        FORCE_SCAN_ENV
+        in {
             "",
             "true",
             "1",
             "yes"
-        }:
+        }
+    ):
 
-            return manual_mode
+        return MODE_ENV
 
-    now = get_now()
+    # ------------------------------------------
+    # 한국시간
+    # ------------------------------------------
 
-    h = now.hour
-    m = now.minute
+    now = now_kst()
 
-    # 오전
-    if h == 9 and m <= 30:
+    hour = now.hour
+    minute = now.minute
+
+    # ------------------------------------------
+    # 09:00 ~ 09:30
+    # ------------------------------------------
+
+    if (
+        hour == 9
+        and
+        0 <= minute <= 30
+    ):
+
         return "morning"
 
-    # 장중
+    # ------------------------------------------
+    # 09:31 ~ 15:05
+    # ------------------------------------------
+
     if (
-        (h == 9 and m > 30)
-        or (10 <= h < 15)
-        or (h == 15 and m < 10)
+        (
+            hour == 9
+            and
+            minute >= 31
+        )
+        or
+        (
+            10 <= hour <= 14
+        )
+        or
+        (
+            hour == 15
+            and
+            minute <= 5
+        )
     ):
+
         return "intraday"
 
-    # 종가
-    if h == 15 and 10 <= m <= 20:
+    # ------------------------------------------
+    # 15:10 ~ 15:20
+    # ------------------------------------------
+
+    if (
+        hour == 15
+        and
+        10 <= minute <= 20
+    ):
+
         return "close"
+
+    # ------------------------------------------
+    # 나머지
+    # ------------------------------------------
 
     return "monitor"
 
@@ -1416,17 +1724,20 @@ def get_mode():
 
 def run():
 
-    now = get_now()
+    now = now_kst()
 
     print(
         "===================================="
     )
+
     print(
-        " KOREA STOCK HUNTER V6"
+        " KOREA STOCK HUNTER V6.1"
     )
+
     print(
         f" KST: {now.isoformat()}"
     )
+
     print(
         "===================================="
     )
@@ -1437,19 +1748,15 @@ def run():
         f"MODE: {mode}"
     )
 
-    start_date = get_start_date()
+    begin = start_date()
 
-    # --------------------------------------------------------
-    # 1. 종목 universe
-    # --------------------------------------------------------
+    # ==========================================
+    # KRX
+    # ==========================================
 
     universe = get_universe()
 
     if universe.empty:
-
-        print(
-            "DATA SOURCE ERROR"
-        )
 
         send_telegram(
             "⚠️ <b>[국장 봇 오류]</b>\n"
@@ -1464,45 +1771,61 @@ def run():
         .tolist()
     )
 
-    # --------------------------------------------------------
-    # 2. 실시간 조회
-    # --------------------------------------------------------
-
-    print(
-        f"실시간 시세 조회: {len(codes)}개"
-    )
+    # ==========================================
+    # REALTIME
+    # ==========================================
 
     quotes = get_realtime_quotes(
         codes
     )
 
-    print(
-        f"실시간 데이터: {len(quotes)}개"
-    )
+    # 실시간 데이터가 너무 적으면
+    # 스크리닝을 하지 않고 종료
+    if len(quotes) < 30:
 
-    # --------------------------------------------------------
-    # 3. 기존 포지션 모니터
-    # --------------------------------------------------------
+        print(
+            "⚠️ 실시간 데이터가 "
+            f"{len(quotes)}개뿐입니다."
+        )
+
+        send_telegram(
+            "⚠️ <b>[국장 데이터 경고]</b>\n"
+            f"KRX 종목: {len(codes)}개\n"
+            f"실시간 데이터: {len(quotes)}개\n\n"
+            "실시간 데이터가 충분하지 않아 "
+            "이번 스크리닝을 건너뜁니다."
+        )
+
+        # 기존 포지션은 가능한 범위에서 추적
+        monitor_positions(
+            quotes
+        )
+
+        return
+
+    # ==========================================
+    # POSITION MONITOR
+    # ==========================================
 
     monitor_positions(
         quotes
     )
 
-    # --------------------------------------------------------
-    # 4. 스크리닝
-    # --------------------------------------------------------
+    # ==========================================
+    # SCAN
+    # ==========================================
 
     if mode == "morning":
 
         candidates = scan_morning(
             universe,
             quotes,
-            start_date
+            begin
         )
 
         send_candidates(
             candidates,
-            "🚀 <b>[시초가 공략] 상승 후보</b>",
+            "🌅 <b>[시초 상승 후보]</b>",
             "morning",
             False
         )
@@ -1512,12 +1835,12 @@ def run():
         candidates = scan_intraday(
             universe,
             quotes,
-            start_date
+            begin
         )
 
         send_candidates(
             candidates,
-            "📈 <b>[장중 상승] 주도주 후보</b>",
+            "📈 <b>[장중 상승 후보]</b>",
             "intraday",
             False
         )
@@ -1527,34 +1850,38 @@ def run():
         candidates = scan_closing(
             universe,
             quotes,
-            start_date
+            begin
         )
 
         send_candidates(
             candidates,
-            "🚨 <b>[15:20 종가베팅] 다음날 상승 후보</b>",
+            "🚨 <b>[15:20 종가 후보]</b>",
             "closing",
             True
         )
 
         send_telegram(
             "🏁 <b>[국장 자동화]</b>\n"
-            "종가 후보 검색 및 포지션 저장 완료."
+            "종가 후보 검색 완료.\n"
+            f"추적 포지션: "
+            f"<code>{len(load_positions())}개</code>"
         )
 
     else:
 
         print(
-            "현재 시각은 스크리닝 시간이 아니므로 "
+            "스크리닝 시간이 아니므로 "
             "포지션 모니터링만 실행합니다."
         )
 
     print(
         "===================================="
     )
+
     print(
         " RUN COMPLETE"
     )
+
     print(
         "===================================="
     )
