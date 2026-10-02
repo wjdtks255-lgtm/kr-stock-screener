@@ -1,6 +1,8 @@
 requests
 pandas
+numpy
+pytz
+lxml
+finance-datareader
 beautifulsoup4
 html5lib
-finance-datareader
-python-telegram-bot
