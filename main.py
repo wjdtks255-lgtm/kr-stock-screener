@@ -14,7 +14,7 @@ TIMEOUT = 8
 S = requests.Session()
 
 S.headers.update({
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://m.stock.naver.com/"
 })
 
@@ -37,7 +37,7 @@ def tg(text):
         print("[TELEGRAM]", r.status_code)
         return r.ok
     except Exception as e:
-        print("[TELEGRAM]", e)
+        print("[TELEGRAM ERR]", e)
         return False
 
 def load_state():
@@ -49,8 +49,11 @@ def load_state():
     return s
 
 def save_state(s):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(s, f, ensure_ascii=False, indent=2)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(s, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("[STATE SAVE ERR]", e)
 
 def run_mode():
     if FORCE in ("1", "true", "yes", "on") and MODE in ("morning", "intraday", "close", "monitor"):
@@ -67,33 +70,82 @@ def universe():
     out = []
     seen = set()
 
-    # 네이버 모바일 실시간 거래상위/시총상위 API를 활용하여 우회 수집 (차단 없음)
-    api_urls = [
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=market_sum&sosok=0", # 코스피 시총
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=market_sum&sosok=1", # 코스닥 시총
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=rise&sosok=0",     # 코스피 상승
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=rise&sosok=1",     # 코스닥 상승
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=quant&sosok=0",    # 코스피 거래량
-        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=quant&sosok=1"     # 코스닥 거래량
+    configs = [
+        ("KOSPI", "marketValue"),
+        ("KOSDAQ", "marketValue"),
+        ("KOSPI", "up"),
+        ("KOSDAQ", "up"),
+        ("KOSPI", "quantTop"),
+        ("KOSDAQ", "quantTop")
     ]
 
-    for u in api_urls:
-        try:
-            r = S.get(u, timeout=TIMEOUT)
-            if r.status_code != 200:
-                continue
-            j = r.json()
-            items = j.get("result", {}).get("itemList", [])
-            for item in items:
-                code = str(item.get("cd", "")).strip()
-                name = str(item.get("nm", "")).strip()
-                if re.fullmatch(r"\d{6}", code) and name and code not in seen:
-                    seen.add(code)
-                    out.append({"code": code, "name": name})
-        except Exception as e:
-            print("[UNIVERSE ERR]", e)
+    for category, sort_type in configs:
+        for page in range(1, 4):
+            try:
+                r = S.get(
+                    "https://m.stock.naver.com/front-api/stock/domestic/stockList",
+                    params={
+                        "sortType": sort_type,
+                        "category": category,
+                        "page": page,
+                        "pageSize": 100
+                    },
+                    timeout=TIMEOUT
+                )
 
-    print("[UNIVERSE]", len(out))
+                print("[LIST]", category, sort_type, page, r.status_code, len(r.text))
+
+                if r.status_code != 200:
+                    continue
+
+                j = r.json()
+
+                if page == 1:
+                    if isinstance(j, dict):
+                        print("[LIST KEYS]", list(j.keys())[:20])
+                    else:
+                        print("[LIST TYPE]", type(j).__name__)
+
+                def scan(x):
+                    if isinstance(x, dict):
+                        code = str(
+                            x.get("itemCode") or
+                            x.get("code") or
+                            x.get("cd") or
+                            ""
+                        ).strip()
+
+                        name = str(
+                            x.get("name") or
+                            x.get("itemName") or
+                            x.get("nm") or
+                            ""
+                        ).strip()
+
+                        if re.fullmatch(r"\d{6}", code) and name:
+                            if code not in seen:
+                                seen.add(code)
+                                out.append({
+                                    "code": code,
+                                    "name": name
+                                })
+
+                        for v in x.values():
+                            scan(v)
+
+                    elif isinstance(x, list):
+                        for v in x:
+                            scan(v)
+
+                scan(j)
+
+                if not out and page == 1:
+                    print("[LIST SAMPLE]", r.text[:500])
+
+            except Exception as e:
+                print("[LIST ERR]", category, sort_type, page, e)
+
+    print("[UNIVERSE] Total:", len(out))
     return out
 
 def quotes(items):
@@ -161,7 +213,13 @@ def history(code):
         if d.empty:
             return []
 
+        # 필드 정규화 및 날짜 키 방어
+        date_col = "localDate" if "localDate" in d.columns else ("date" if "date" in d.columns else None)
+        if not date_col:
+            return []
+
         d = d.rename(columns={
+            date_col: "date",
             "closePrice": "close",
             "openPrice": "open",
             "highPrice": "high",
@@ -169,15 +227,18 @@ def history(code):
             "accumulatedTradingVolume": "volume"
         })
 
-        need = ["close", "open", "high", "low", "volume"]
+        need = ["date", "close", "open", "high", "low", "volume"]
         if len(d) < 30 or any(c not in d for c in need):
             return []
 
-        for c in need:
+        for c in ["close", "open", "high", "low", "volume"]:
             d[c] = pd.to_numeric(d[c], errors="coerce")
 
+        # 🚨 [핵심 안전장치] 날짜 기준 오름차순(과거 -> 최신) 정렬 강제화
+        d = d.sort_values("date").dropna(subset=need)
+
         bars = []
-        for _, row in d.dropna(subset=need).iterrows():
+        for _, row in d.iterrows():
             bars.append({
                 "close": row["close"],
                 "open": row["open"],
@@ -396,7 +457,7 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V8.3")
+    print(" KOREA STOCK HUNTER V9.0")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
@@ -419,7 +480,7 @@ def main():
         save_state(st)
         return
 
-    if len(qs) < 20:
+    if len(qs) < 10:
         tg(
             f"⚠️ [국장 자동화]\n"
             f"실시간 데이터 부족\n"
