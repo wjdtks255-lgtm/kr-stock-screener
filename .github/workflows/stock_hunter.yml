@@ -2,42 +2,28 @@ name: Korea Stock Hunter
 
 on:
   schedule:
-    # 09:05~09:30 KST
     - cron: '5,10,15,20,25,30 0 * * 1-5'
-
-    # 09:35~09:55 KST
     - cron: '35,40,45,50,55 0 * * 1-5'
-
-    # 10:00~14:55 KST
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1,2,3,4,5 * * 1-5'
-
-    # 15:00 / 15:05 KST
     - cron: '0,5 6 * * 1-5'
-
-    # 15:10 / 15:15 / 15:20 KST
     - cron: '10,15,20 6 * * 1-5'
-
   workflow_dispatch:
     inputs:
       MODE:
         description: '실행 모드'
         required: true
-        default: 'monitor'
+        default: 'intraday'
         type: choice
         options:
           - morning
           - intraday
           - close
           - monitor
-
       FORCE_SCAN:
-        description: '강제 실행'
+        description: '강제 스캔'
         required: true
         default: true
         type: boolean
-
-permissions:
-  contents: write
 
 concurrency:
   group: korea-stock-hunter
@@ -46,7 +32,8 @@ concurrency:
 jobs:
   run-hunter:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -67,15 +54,14 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          MODE: ${{ github.event.inputs.MODE || '' }}
-          FORCE_SCAN: ${{ github.event.inputs.FORCE_SCAN || '' }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.MODE || '' }}
+          FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.FORCE_SCAN || '' }}
         run: python main.py
 
-      - name: Save state
+      - name: Commit State
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: active_positions.json
-          commit_message: "Update Korea Stock Hunter state [skip ci]"
+          commit_message: "Update stock hunter state [skip ci]"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
