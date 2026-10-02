@@ -1,7 +1,8 @@
-import os, json, re, requests
+import os, json, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
+from pykrx import stock
 
 TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
@@ -10,17 +11,8 @@ FORCE = os.getenv("FORCE_SCAN", "").strip().lower()
 
 STATE_FILE = "active_positions.json"
 KST = ZoneInfo("Asia/Seoul")
-TIMEOUT = 8
+TIMEOUT = 10
 S = requests.Session()
-
-S.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://m.stock.naver.com/"
-})
-
-def n(v, d=0.):
-    try: return float(str(v).replace(",", "").replace("%", "").strip())
-    except: return d
 
 def tg(text):
     if not TOKEN or not CHAT_ID: return False
@@ -66,179 +58,106 @@ def run_mode():
     if 910 <= m <= 920: return "close"
     return "monitor"
 
-def universe():
-    out = []
-    seen = set()
+def get_latest_trading_date():
+    # 오늘 또는 직전 영업일 찾기 (주말/공휴일 대응)
+    d = datetime.now(KST)
+    for _ in range(5):
+        s_date = d.strftime("%Y%m%d")
+        try:
+            df = stock.get_market_ohlcv_by_ticker(s_date, market="KOSPI")
+            if not df.empty:
+                return s_date
+        except:
+            pass
+        d -= timedelta(days=1)
+    return datetime.now(KST).strftime("%Y%m%d")
 
-    configs = [
-        ("KOSPI", "marketValue"),
-        ("KOSDAQ", "marketValue"),
-        ("KOSPI", "up"),
-        ("KOSDAQ", "up"),
-        ("KOSPI", "quantTop"),
-        ("KOSDAQ", "quantTop")
-    ]
+def universe_and_quotes():
+    """
+    pykrx를 이용해 KOSPI/KOSDAQ 전 종목의 당일 시세(가격, 거래량, 거래대금, 등락률)를 
+    한 번에 가져와서 유니버스와 실시간 쿼리 데이터(quotes)를 동시 구축합니다.
+    """
+    out_items = []
+    out_quotes = {}
+    
+    date_str = get_latest_trading_date()
+    print("[PYKRX] Target Date:", date_str)
 
-    for category, sort_type in configs:
-        for page in range(1, 4):
-            try:
-                r = S.get(
-                    "https://m.stock.naver.com/front-api/stock/domestic/stockList",
-                    params={
-                        "sortType": sort_type,
-                        "category": category,
-                        "page": page,
-                        "pageSize": 100
-                    },
-                    timeout=TIMEOUT
-                )
+    for market in ["KOSPI", "KOSDAQ"]:
+        try:
+            df = stock.get_market_ohlcv_by_ticker(date_str, market=market)
+            if df.empty:
+                continue
+            
+            for code, row in df.iterrows():
+                code_str = str(code).zfill(6)
+                name = stock.get_market_ticker_name(code_str)
+                
+                price = float(row.get("종가가격") if "종가가격" in row else row.get("종가", 0))
+                change = float(row.get("등락률", 0))
+                open_p = float(row.get("시가", 0))
+                high_p = float(row.get("고가", 0))
+                low_p = float(row.get("저가", 0))
+                volume = float(row.get("거래량", 0))
+                turnover = float(row.get("거래대금", 0))
 
-                print("[LIST]", category, sort_type, page, r.status_code, len(r.text))
-
-                if r.status_code != 200:
+                if price <= 0:
                     continue
 
-                j = r.json()
+                out_items.append({
+                    "code": code_str,
+                    "name": name
+                })
 
-                if page == 1:
-                    if isinstance(j, dict):
-                        print("[LIST KEYS]", list(j.keys())[:20])
-                    else:
-                        print("[LIST TYPE]", type(j).__name__)
-
-                def scan(x):
-                    if isinstance(x, dict):
-                        code = str(
-                            x.get("itemCode") or
-                            x.get("code") or
-                            x.get("cd") or
-                            ""
-                        ).strip()
-
-                        name = str(
-                            x.get("name") or
-                            x.get("itemName") or
-                            x.get("nm") or
-                            ""
-                        ).strip()
-
-                        if re.fullmatch(r"\d{6}", code) and name:
-                            if code not in seen:
-                                seen.add(code)
-                                out.append({
-                                    "code": code,
-                                    "name": name
-                                })
-
-                        for v in x.values():
-                            scan(v)
-
-                    elif isinstance(x, list):
-                        for v in x:
-                            scan(v)
-
-                scan(j)
-
-                if not out and page == 1:
-                    print("[LIST SAMPLE]", r.text[:500])
-
-            except Exception as e:
-                print("[LIST ERR]", category, sort_type, page, e)
-
-    print("[UNIVERSE] Total:", len(out))
-    return out
-
-def quotes(items):
-    out = {}
-
-    for i in range(0, len(items), 40):
-        batch = items[i:i+40]
-        q_str = "|".join(x["code"] for x in batch)
-
-        try:
-            u = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{q_str}"
-            r = S.get(u, timeout=TIMEOUT)
-
-            if r.status_code != 200:
-                continue
-
-            j = r.json()
-
-            for area in j.get("areas", []):
-                for d in area.get("datas", []):
-                    code = str(d.get("cd") or "").zfill(6)
-                    price = n(d.get("nv"))
-
-                    if not code or not price:
-                        continue
-
-                    out[code] = {
-                        "price": price,
-                        "change": n(d.get("cr")),
-                        "open": n(d.get("ov")),
-                        "high": n(d.get("hv")),
-                        "low": n(d.get("lv")),
-                        "volume": n(d.get("aq")),
-                        "turnover": n(d.get("aa"))
-                    }
-
+                out_quotes[code_str] = {
+                    "price": price,
+                    "change": change,
+                    "open": open_p,
+                    "high": high_p,
+                    "low": low_p,
+                    "volume": volume,
+                    "turnover": turnover
+                }
         except Exception as e:
-            print("[QUOTE ERR]", i, e)
+            print(f"[UNIVERSE ERR] {market}:", e)
 
-    print("[QUOTE]", len(out), "/", len(items))
-    return out
+    print(f"[UNIVERSE] Total Items: {len(out_items)}")
+    print(f"[QUOTE] Total Quotes: {len(out_quotes)}")
+    return out_items, out_quotes
 
 def history(code):
+    """
+    pykrx를 이용해 특정 종목의 최근 180일 일봉 데이터를 오름차순으로 정확하게 가져옵니다.
+    """
     try:
-        end = datetime.now(KST).date()
-        start = end - timedelta(days=180)
+        end = datetime.now(KST).strftime("%Y%m%d")
+        start = (datetime.now(KST) - timedelta(days=220)).strftime("%Y%m%d")
 
-        u = f"https://api.stock.naver.com/chart/domestic/item/{code}"
-        r = S.get(
-            u,
-            params={
-                "periodType": "dayCandle",
-                "startDateTime": start.strftime("%Y%m%d"),
-                "endDateTime": end.strftime("%Y%m%d")
-            },
-            timeout=TIMEOUT
-        )
-
-        if r.status_code != 200:
+        df = stock.get_market_ohlcv_by_date(start, end, code)
+        if df.empty or len(df) < 30:
             return []
 
-        j = r.json()
-        d = pd.DataFrame(j.get("priceInfo") or [])
-
-        if d.empty:
-            return []
-
-        # 필드 정규화 및 날짜 키 방어
-        date_col = "localDate" if "localDate" in d.columns else ("date" if "date" in d.columns else None)
-        if not date_col:
-            return []
-
-        d = d.rename(columns={
+        df = df.reset_index()
+        # 날짜 컬럼명 대응 (날짜 또는 날짜/시간)
+        date_col = next((c for c in df.columns if "날짜" in c or "date" in str(c).lower()), df.columns[0])
+        
+        df = df.rename(columns={
             date_col: "date",
-            "closePrice": "close",
-            "openPrice": "open",
-            "highPrice": "high",
-            "lowPrice": "low",
-            "accumulatedTradingVolume": "volume"
+            "종가": "close",
+            "시가": "open",
+            "고가": "high",
+            "저가": "low",
+            "거래량": "volume"
         })
 
-        need = ["date", "close", "open", "high", "low", "volume"]
-        if len(d) < 30 or any(c not in d for c in need):
-            return []
+        need = ["close", "open", "high", "low", "volume"]
+        for c in need:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        for c in ["close", "open", "high", "low", "volume"]:
-            d[c] = pd.to_numeric(d[c], errors="coerce")
-
-        # 🚨 [핵심 안전장치] 날짜 기준 오름차순(과거 -> 최신) 정렬 강제화
-        d = d.sort_values("date").dropna(subset=need)
+        df = df.sort_values("date").dropna(subset=need)
 
         bars = []
-        for _, row in d.iterrows():
+        for _, row in df.iterrows():
             bars.append({
                 "close": row["close"],
                 "open": row["open"],
@@ -351,12 +270,13 @@ def news(name):
                 "gl": "KR",
                 "ceid": "KR:ko"
             },
-            timeout=TIMEOUT
+            timeout=5
         )
 
         if r.status_code != 200:
             return []
 
+        import re
         return [
             re.sub(r"<.*?>", "", x).strip()
             for x in re.findall(r"<item>.*?<title>(.*?)</title>.*?</item>", r.text, re.S | re.I)[:2]
@@ -385,7 +305,7 @@ def build(item, q, a, md):
         f"📊 상승 근거: {' · '.join(why[:5])}",
         "",
         f"🟢 진입: {p:,.0f}원",
-        f"🛡️ SL: {sl:,.0f}원",
+        f"🛡️️ SL: {sl:,.0f}원",
         f"🎯 TP1: {tp1:,.0f}원",
         f"🎯 TP2: {tp2:,.0f}원"
     ]
@@ -418,10 +338,10 @@ def monitor(st, qs):
             continue
 
         p = q["price"]
-        sl = n(pos.get("sl"))
-        entry = n(pos.get("entry"))
-        tp1 = n(pos.get("tp1"))
-        tp2 = n(pos.get("tp2"))
+        sl = float(pos.get("sl", 0))
+        entry = float(pos.get("entry", 0))
+        tp1 = float(pos.get("tp1", 0))
+        tp2 = float(pos.get("tp2", 0))
 
         if p <= sl:
             tg(
@@ -457,36 +377,25 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V9.0")
+    print(" KOREA STOCK HUNTER V10.0 (PyKrx)")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
 
     st = load_state()
-    items = universe()
+    items, qs = universe_and_quotes()
 
-    if not items:
+    if not items or not qs:
         tg(
             "⚠️ [국장 자동화]\n"
-            "종목 목록을 가져오지 못했습니다.\n"
+            "KRX 데이터 수집 실패\n"
             "이번 스캔을 중단했습니다."
         )
         return
 
-    qs = quotes(items)
-
     if md == "monitor":
         monitor(st, qs)
         save_state(st)
-        return
-
-    if len(qs) < 10:
-        tg(
-            f"⚠️ [국장 자동화]\n"
-            f"실시간 데이터 부족\n"
-            f"조회 성공: {len(qs)}/{len(items)}\n"
-            f"이번 스캔을 중단했습니다."
-        )
         return
 
     pool = []
