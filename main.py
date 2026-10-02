@@ -15,7 +15,7 @@ import FinanceDataReader as fdr
 
 
 # ============================================================
-# KOREA STOCK HUNTER V6.2 (Fallback Enhanced)
+# KOREA STOCK HUNTER V6.3 (Ultimate Fallback Enhanced)
 # ============================================================
 # 목적
 # 1) 장초 상승 후보
@@ -384,92 +384,98 @@ def get_realtime_quotes(codes):
 
 
 # ============================================================
-# KRX UNIVERSE (FALLBACK ENHANCED)
+# KRX UNIVERSE (ULTIMATE FALLBACK ENHANCED)
 # ============================================================
 
 def get_universe():
-    print("KRX 종목 목록 다운로드...")
+    print("KRX 종목 목록 다운로드 시도...")
 
     # 1차 시도: FinanceDataReader 활용
     try:
         df = fdr.StockListing("KRX")
         if df is not None and not df.empty:
             print(f"원본 KRX universe (FDR): {len(df)}개")
-
-            if "Code" in df.columns:
-                df["Code"] = (
-                    df["Code"]
-                    .astype(str)
-                    .str.replace(".0", "", regex=False)
-                    .str.zfill(6)
-                )
-            elif "Symbol" in df.columns:
-                df["Symbol"] = (
-                    df["Symbol"]
-                    .astype(str)
-                    .str.replace(".0", "", regex=False)
-                    .str.zfill(6)
-                )
-                df = df.rename(columns={"Symbol": "Code"})
-
-            if "Name" not in df.columns:
-                df["Name"] = df["Code"]
-
-            if "Amount" in df.columns:
-                df["Amount"] = pd.to_numeric(
-                    df["Amount"],
-                    errors="coerce"
-                ).fillna(0)
-                df = df.sort_values(
-                    "Amount",
-                    ascending=False
-                )
-
-            df = df.head(UNIVERSE_SIZE)
-            df = df[["Code", "Name"]].drop_duplicates(subset=["Code"])
-            print(f"KRX universe 확정: {len(df)}개")
-            return df
-
+            return _format_universe_df(df)
     except Exception as e:
         print(f"[UNIVERSE ERROR - FDR Failed] {repr(e)}")
 
-    # 2차 시도: 네이버 금융 크롤링 Fallback (FDR 장애 대응)
-    print("네이버 금융 대체 크롤링으로 종목 목록을 구성합니다...")
-    fallback_rows = []
+    # 2차 시도: KRX 정보데이터시스템 직접 다운로드 (API 우회 방식)
     try:
-        for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
-            page = 1
-            while page <= 15:  # 상위 페이지 탐색
-                url = f"https://finance.naver.com/sise/sise_market_sum.nhn?sosok={sosok}&page={page}"
-                res = requests.get(url, headers=NAVER_HEADERS, timeout=7)
-                if res.status_code != 200:
-                    break
-                
-                html = res.text
-                matches = re.findall(r'href="/item/main\.(?:naver|nhn)\?code=(\d{6})"[^>]*>([^<]+)</a>', html)
-                
-                if not matches:
-                    break
-                
-                seen_in_page = set()
-                for code, name in matches:
-                    if code not in seen_in_page:
-                        seen_in_page.add(code)
-                        fallback_rows.append({"Code": code, "Name": name.strip()})
-                
-                page += 1
-                time.sleep(0.05)
+        print("KRX 직접 데이터 연동 시도...")
+        url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+        df_list = pd.read_html(url, header=0, encoding='cp949')
+        if df_list:
+            df = df_list[0]
+            df['Code'] = df['종목코드'].astype(str).str.zfill(6)
+            df['Name'] = df['회사명']
+            df = df[['Code', 'Name']].drop_duplicates(subset=["Code"])
+            if not df.empty:
+                print(f"KRX 직접 연동 성공: {len(df)}개")
+                return df.head(UNIVERSE_SIZE)
+    except Exception as e2:
+        print(f"[FALLBACK ERROR - KRX Direct Failed] {repr(e2)}")
 
-        if fallback_rows:
-            df_fallback = pd.DataFrame(fallback_rows)
-            df_fallback = df_fallback.drop_duplicates(subset=["Code"]).head(UNIVERSE_SIZE)
-            print(f"네이버 금융 Fallback 유니버스 확보 성공: {len(df_fallback)}개")
-            return df_fallback
-
-    except Exception as ex:
-        print(f"[FALLBACK ERROR] {repr(ex)}")
+    # 3차 시도: 네이버 모바일 증권 API 우회 방식
+    try:
+        print("네이버 모바일 JSON API로 종목 목록 구성 시도...")
+        rows = []
+        for market in ["KOSPI", "KOSDAQ"]:
+            url = f"https://m.stock.naver.com/api/list/stocks/marketCapitalization.json?market={market}&pageSize=300"
+            res = requests.get(url, headers=NAVER_HEADERS, timeout=7)
+            if res.status_code == 200:
+                data = res.json()
+                stocks = data.get("result", {}).get("stocks", [])
+                for s in stocks:
+                    code = s.get("itemCode")
+                    name = s.get("stockName")
+                    if code and name:
+                        rows.append({"Code": code, "Name": name})
+        
+        if rows:
+            df_mob = pd.DataFrame(rows).drop_duplicates(subset=["Code"])
+            print(f"네이버 모바일 API 유니버스 확보 성공: {len(df_mob)}개")
+            return df_mob.head(UNIVERSE_SIZE)
+            
+    except Exception as e3:
+        print(f"[FALLBACK ERROR - Naver Mobile API Failed] {repr(e3)}")
 
     return pd.DataFrame()
+
+
+def _format_universe_df(df):
+    if "Code" in df.columns:
+        df["Code"] = (
+            df["Code"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+    elif "Symbol" in df.columns:
+        df["Symbol"] = (
+            df["Symbol"]
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+            .str.zfill(6)
+        )
+        df = df.rename(columns={"Symbol": "Code"})
+
+    if "Name" not in df.columns:
+        df["Name"] = df["Code"]
+
+    if "Amount" in df.columns:
+        df["Amount"] = pd.to_numeric(
+            df["Amount"],
+            errors="coerce"
+        ).fillna(0)
+        df = df.sort_values(
+            "Amount",
+            ascending=False
+        )
+
+    df = df.head(UNIVERSE_SIZE)
+    df = df[["Code", "Name"]].drop_duplicates(subset=["Code"])
+    print(f"KRX universe 확정: {len(df)}개")
+    return df
 
 
 # ============================================================
@@ -1732,7 +1738,7 @@ def main():
     )
 
     print(
-        " KOREA STOCK HUNTER V6.2"
+        " KOREA STOCK HUNTER V6.3"
     )
 
     print(
