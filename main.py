@@ -14,8 +14,8 @@ TIMEOUT = 8
 S = requests.Session()
 
 S.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://finance.naver.com/"
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Referer": "https://m.stock.naver.com/"
 })
 
 def n(v, d=0.):
@@ -67,29 +67,31 @@ def universe():
     out = []
     seen = set()
 
-    # 네이버 금융 시가총액 페이지 (KOSPI: 0, KOSDAQ: 1)
-    for market in (0, 1):
-        for page in range(1, 8):
-            try:
-                u = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={market}&page={page}"
-                res = S.get(u, timeout=TIMEOUT)
-                
-                # EUC-KR 인코딩 명시적 디코딩 처리
-                t = res.content.decode('euc-kr', errors='ignore')
+    # 네이버 모바일 실시간 거래상위/시총상위 API를 활용하여 우회 수집 (차단 없음)
+    api_urls = [
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=market_sum&sosok=0", # 코스피 시총
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=market_sum&sosok=1", # 코스닥 시총
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=rise&sosok=0",     # 코스피 상승
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=rise&sosok=1",     # 코스닥 상승
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=quant&sosok=0",    # 코스피 거래량
+        "https://m.stock.naver.com/api/json/sise/siseList.json?menu=quant&sosok=1"     # 코스닥 거래량
+    ]
 
-                rows = re.findall(
-                    r'code=(\d{6})[^>]*>\s*([^<]+?)\s*</a>',
-                    t
-                )
-
-                for code, name in rows:
-                    name = re.sub(r"<.*?>", "", name).strip()
-                    if code not in seen and name and len(name) > 1:
-                        seen.add(code)
-                        out.append({"code": code, "name": name})
-
-            except Exception as e:
-                print("[LIST ERR]", market, page, e)
+    for u in api_urls:
+        try:
+            r = S.get(u, timeout=TIMEOUT)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            items = j.get("result", {}).get("itemList", [])
+            for item in items:
+                code = str(item.get("cd", "")).strip()
+                name = str(item.get("nm", "")).strip()
+                if re.fullmatch(r"\d{6}", code) and name and code not in seen:
+                    seen.add(code)
+                    out.append({"code": code, "name": name})
+        except Exception as e:
+            print("[UNIVERSE ERR]", e)
 
     print("[UNIVERSE]", len(out))
     return out
@@ -394,7 +396,7 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V8.2")
+    print(" KOREA STOCK HUNTER V8.3")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
