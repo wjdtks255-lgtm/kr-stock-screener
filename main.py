@@ -60,21 +60,15 @@ def run_mode():
 
 def universe_and_quotes():
     """
-    FinanceDataReader를 이용해 KRX 전 종목 마스터와 최신 종가 시세를 안정적으로 수집합니다.
+    FinanceDataReader를 이용해 KRX 전 종목 마스터를 안정적으로 수집합니다.
     """
     out_items = []
-    out_quotes = {}
 
     try:
-        # KOSPI, KOSDAQ 전 종목 리스트 가져오기
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty:
             print("[UNIVERSE ERR] KRX listing is empty")
-            return [], {}
-
-        # 가장 최근 영업일의 개별 종목 시세 데이터를 한 번에 가져오기 위해 최근 날짜 지정
-        end_date = datetime.now(KST).strftime("%Y-%m-%d")
-        start_date = (datetime.now(KST) - timedelta(days=5)).strftime("%Y-%m-%d")
+            return []
 
         for _, row in df_krx.iterrows():
             code = str(row.get("Code") or row.get("symbol") or "").zfill(6)
@@ -84,7 +78,6 @@ def universe_and_quotes():
             if not code or not name:
                 continue
             
-            # 코스피, 코스닥 종목만 대상로 지정
             if "KOSPI" not in market and "KOSDAQ" not in market:
                 continue
 
@@ -93,8 +86,6 @@ def universe_and_quotes():
                 "name": name
             })
 
-        # 대량 종목의 당일 시세를 빠르게 조회 (최근 1일 데이터)
-        # 상위 유동성 확보를 위해 주요 종목 또는 전체 순회 시세 조회
         print(f"[UNIVERSE] Total Target Items: {len(out_items)}")
 
     except Exception as e:
@@ -128,8 +119,6 @@ def get_market_quotes(items):
             open_p = float(latest["Open"])
             high_p = float(latest["High"])
             low_p = float(latest["Low"])
-            
-            # 거래대금 추정 (종가 * 거래량) 또는 제공 데이터 활용
             turnover = price * volume
 
             if price <= 0:
@@ -144,8 +133,7 @@ def get_market_quotes(items):
                 "volume": volume,
                 "turnover": turnover
             }
-        except Exception as e:
-            # 개별 종목 조회 에러는 무시하고 패스
+        except Exception:
             continue
 
     print(f"[QUOTE] Total Loaded Quotes: {len(out_quotes)}")
@@ -153,7 +141,7 @@ def get_market_quotes(items):
 
 def history(code):
     """
-    FinanceDataReader를 이용해 최근 180일 일봉 데이터를 오름차순으로 정확하게 가져옵니다.
+    최근 일봉 데이터를 오름차순으로 가져옵니다.
     """
     try:
         end_str = datetime.now(KST).strftime("%Y-%m-%d")
@@ -343,9 +331,14 @@ def build(item, q, a, md):
         lines += ["", "📰 최근 뉴스"]
         lines += [f"• {x}" for x in ns]
 
+    # PC 및 모바일 사용자 모두를 위한 링크 제공
+    pc_url = f"https://finance.naver.com/item/main.naver?code={item['code']}"
+    m_url = f"https://m.stock.naver.com/domestic/stock/{item['code']}/total"
+
     lines += [
         "",
-        f"https://finance.naver.com/item/main.naver?code={item['code']}"
+        f"🔗 PC: {pc_url}",
+        f"📱 모바일: {m_url}"
     ]
 
     position = {
@@ -405,7 +398,7 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V11.0 (FDR)")
+    print(" KOREA STOCK HUNTER V11.1 (FDR)")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
@@ -421,8 +414,6 @@ def main():
         )
         return
 
-    # 1차 필터링을 빠르게 수행하기 위해 거래대금/등락률 상위 위주 또는 조건 부합 후보 선별
-    # 전체 종목 중 속도를 위해 상용 거래량/변동성 있는 종목 선별 혹은 쿼리 조회
     qs = get_market_quotes(items)
 
     if md == "monitor":
