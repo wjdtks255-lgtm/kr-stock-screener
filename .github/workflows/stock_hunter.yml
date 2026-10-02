@@ -7,18 +7,19 @@ on:
     - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1,2,3,4,5 * * 1-5'
     - cron: '0,5 6 * * 1-5'
     - cron: '10,15,20 6 * * 1-5'
+
   workflow_dispatch:
     inputs:
       MODE:
         description: '실행 모드'
         required: true
-        default: 'intraday'
+        default: 'Intraday'
         type: choice
         options:
-          - morning
-          - intraday
-          - close
-          - monitor
+          - Morning
+          - Intraday
+          - Close
+          - Monitor
       FORCE_SCAN:
         description: '강제 스캔'
         required: true
@@ -32,6 +33,7 @@ concurrency:
 jobs:
   run-hunter:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
 
@@ -53,19 +55,33 @@ jobs:
       - name: Check Secrets
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          test -n "$TELEGRAM_TOKEN" || { echo "ERROR: TELEGRAM_TOKEN 없음"; exit 1; }
-          test -n "$TELEGRAM_CHAT_ID" || { echo "ERROR: TELEGRAM_CHAT_ID 없음"; exit 1; }
+          test -n "$TELEGRAM_TOKEN" || {
+            echo "ERROR: TELEGRAM_TOKEN 없음"
+            exit 1
+          }
+          test -n "$TELEGRAM_CHAT_ID" || {
+            echo "ERROR: CHAT_ID 없음"
+            exit 1
+          }
           echo "Telegram secrets OK"
 
       - name: Run Stock Hunter
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.MODE || '' }}
           FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.FORCE_SCAN || '' }}
-        run: python main.py
+        run: |
+          echo "===================================="
+          echo " KOREA STOCK HUNTER"
+          echo "===================================="
+          echo "Event : ${{ github.event_name }}"
+          echo "Mode  : $MODE"
+          echo "Force : $FORCE_SCAN"
+          echo "===================================="
+          python main.py
 
       - name: Commit State
         uses: stefanzweifel/git-auto-commit-action@v5
