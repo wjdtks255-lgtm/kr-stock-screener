@@ -2,7 +2,7 @@ import os, json, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
-from pykrx import stock
+import FinanceDataReader as fdr
 
 TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
@@ -58,100 +58,128 @@ def run_mode():
     if 910 <= m <= 920: return "close"
     return "monitor"
 
-def get_latest_trading_date():
-    # 오늘 또는 직전 영업일 찾기 (주말/공휴일 대응)
-    d = datetime.now(KST)
-    for _ in range(5):
-        s_date = d.strftime("%Y%m%d")
-        try:
-            df = stock.get_market_ohlcv_by_ticker(s_date, market="KOSPI")
-            if not df.empty:
-                return s_date
-        except:
-            pass
-        d -= timedelta(days=1)
-    return datetime.now(KST).strftime("%Y%m%d")
-
 def universe_and_quotes():
     """
-    pykrx를 이용해 KOSPI/KOSDAQ 전 종목의 당일 시세(가격, 거래량, 거래대금, 등락률)를 
-    한 번에 가져와서 유니버스와 실시간 쿼리 데이터(quotes)를 동시 구축합니다.
+    FinanceDataReader를 이용해 KRX 전 종목 마스터와 최신 종가 시세를 안정적으로 수집합니다.
     """
     out_items = []
     out_quotes = {}
-    
-    date_str = get_latest_trading_date()
-    print("[PYKRX] Target Date:", date_str)
 
-    for market in ["KOSPI", "KOSDAQ"]:
+    try:
+        # KOSPI, KOSDAQ 전 종목 리스트 가져오기
+        df_krx = fdr.StockListing('KRX')
+        if df_krx.empty:
+            print("[UNIVERSE ERR] KRX listing is empty")
+            return [], {}
+
+        # 가장 최근 영업일의 개별 종목 시세 데이터를 한 번에 가져오기 위해 최근 날짜 지정
+        end_date = datetime.now(KST).strftime("%Y-%m-%d")
+        start_date = (datetime.now(KST) - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        for _, row in df_krx.iterrows():
+            code = str(row.get("Code") or row.get("symbol") or "").zfill(6)
+            name = str(row.get("Name") or row.get("name") or "").strip()
+            market = str(row.get("Market") or "").upper()
+
+            if not code or not name:
+                continue
+            
+            # 코스피, 코스닥 종목만 대상로 지정
+            if "KOSPI" not in market and "KOSDAQ" not in market:
+                continue
+
+            out_items.append({
+                "code": code,
+                "name": name
+            })
+
+        # 대량 종목의 당일 시세를 빠르게 조회 (최근 1일 데이터)
+        # 상위 유동성 확보를 위해 주요 종목 또는 전체 순회 시세 조회
+        print(f"[UNIVERSE] Total Target Items: {len(out_items)}")
+
+    except Exception as e:
+        print("[UNIVERSE ERR]", e)
+
+    return out_items
+
+def get_market_quotes(items):
+    """
+    각 종목별 실시간/당일 지표를 FinanceDataReader로 안전하게 가져옵니다.
+    """
+    out_quotes = {}
+    end_str = datetime.now(KST).strftime("%Y-%m-%d")
+    start_str = (datetime.now(KST) - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    for item in items:
+        code = item["code"]
         try:
-            df = stock.get_market_ohlcv_by_ticker(date_str, market=market)
+            df = fdr.DataReader(code, start_str, end_str)
             if df.empty:
                 continue
             
-            for code, row in df.iterrows():
-                code_str = str(code).zfill(6)
-                name = stock.get_market_ticker_name(code_str)
-                
-                price = float(row.get("종가가격") if "종가가격" in row else row.get("종가", 0))
-                change = float(row.get("등락률", 0))
-                open_p = float(row.get("시가", 0))
-                high_p = float(row.get("고가", 0))
-                low_p = float(row.get("저가", 0))
-                volume = float(row.get("거래량", 0))
-                turnover = float(row.get("거래대금", 0))
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) >= 2 else latest
 
-                if price <= 0:
-                    continue
+            price = float(latest["Close"])
+            prev_close = float(prev["Close"])
+            change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+            
+            volume = float(latest["Volume"])
+            open_p = float(latest["Open"])
+            high_p = float(latest["High"])
+            low_p = float(latest["Low"])
+            
+            # 거래대금 추정 (종가 * 거래량) 또는 제공 데이터 활용
+            turnover = price * volume
 
-                out_items.append({
-                    "code": code_str,
-                    "name": name
-                })
+            if price <= 0:
+                continue
 
-                out_quotes[code_str] = {
-                    "price": price,
-                    "change": change,
-                    "open": open_p,
-                    "high": high_p,
-                    "low": low_p,
-                    "volume": volume,
-                    "turnover": turnover
-                }
+            out_quotes[code] = {
+                "price": price,
+                "change": change,
+                "open": open_p,
+                "high": high_p,
+                "low": low_p,
+                "volume": volume,
+                "turnover": turnover
+            }
         except Exception as e:
-            print(f"[UNIVERSE ERR] {market}:", e)
+            # 개별 종목 조회 에러는 무시하고 패스
+            continue
 
-    print(f"[UNIVERSE] Total Items: {len(out_items)}")
-    print(f"[QUOTE] Total Quotes: {len(out_quotes)}")
-    return out_items, out_quotes
+    print(f"[QUOTE] Total Loaded Quotes: {len(out_quotes)}")
+    return out_quotes
 
 def history(code):
     """
-    pykrx를 이용해 특정 종목의 최근 180일 일봉 데이터를 오름차순으로 정확하게 가져옵니다.
+    FinanceDataReader를 이용해 최근 180일 일봉 데이터를 오름차순으로 정확하게 가져옵니다.
     """
     try:
-        end = datetime.now(KST).strftime("%Y%m%d")
-        start = (datetime.now(KST) - timedelta(days=220)).strftime("%Y%m%d")
+        end_str = datetime.now(KST).strftime("%Y-%m-%d")
+        start_str = (datetime.now(KST) - timedelta(days=220)).strftime("%Y-%m-%d")
 
-        df = stock.get_market_ohlcv_by_date(start, end, code)
+        df = fdr.DataReader(code, start_str, end_str)
         if df.empty or len(df) < 30:
             return []
 
         df = df.reset_index()
-        # 날짜 컬럼명 대응 (날짜 또는 날짜/시간)
-        date_col = next((c for c in df.columns if "날짜" in c or "date" in str(c).lower()), df.columns[0])
-        
+        date_col = next((c for c in df.columns if "date" in str(c).lower() or "날짜" in str(c)), df.columns[0])
+
         df = df.rename(columns={
             date_col: "date",
-            "종가": "close",
-            "시가": "open",
-            "고가": "high",
-            "저가": "low",
-            "거래량": "volume"
+            "Close": "close",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Volume": "volume"
         })
 
-        need = ["close", "open", "high", "low", "volume"]
-        for c in need:
+        need = ["date", "close", "open", "high", "low", "volume"]
+        if any(c not in df.columns for c in need):
+            return []
+
+        for c in ["close", "open", "high", "low", "volume"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
         df = df.sort_values("date").dropna(subset=need)
@@ -305,7 +333,7 @@ def build(item, q, a, md):
         f"📊 상승 근거: {' · '.join(why[:5])}",
         "",
         f"🟢 진입: {p:,.0f}원",
-        f"🛡️️ SL: {sl:,.0f}원",
+        f"🛡 SL: {sl:,.0f}원",
         f"🎯 TP1: {tp1:,.0f}원",
         f"🎯 TP2: {tp2:,.0f}원"
     ]
@@ -377,25 +405,38 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V10.0 (PyKrx)")
+    print(" KOREA STOCK HUNTER V11.0 (FDR)")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
 
     st = load_state()
-    items, qs = universe_and_quotes()
+    items = universe_and_quotes()
 
-    if not items or not qs:
+    if not items:
         tg(
             "⚠️ [국장 자동화]\n"
-            "KRX 데이터 수집 실패\n"
+            "종목 마스터 수집 실패\n"
             "이번 스캔을 중단했습니다."
         )
         return
 
+    # 1차 필터링을 빠르게 수행하기 위해 거래대금/등락률 상위 위주 또는 조건 부합 후보 선별
+    # 전체 종목 중 속도를 위해 상용 거래량/변동성 있는 종목 선별 혹은 쿼리 조회
+    qs = get_market_quotes(items)
+
     if md == "monitor":
         monitor(st, qs)
         save_state(st)
+        return
+
+    if len(qs) < 10:
+        tg(
+            f"⚠️ [국장 자동화]\n"
+            f"실시간 데이터 부족\n"
+            f"조회 성공: {len(qs)}/{len(items)}\n"
+            f"이번 스캔을 중단했습니다."
+        )
         return
 
     pool = []
