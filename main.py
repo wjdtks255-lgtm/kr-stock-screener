@@ -67,21 +67,24 @@ def universe():
     out = []
     seen = set()
 
-    # 네이버 금융 시가총액 페이지(KOSPI: 0, KOSDAQ: 1)를 통해 안정적으로 종목 리스트 수집
+    # 네이버 금융 시가총액 페이지 (KOSPI: 0, KOSDAQ: 1)
     for market in (0, 1):
         for page in range(1, 8):
             try:
                 u = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={market}&page={page}"
-                t = S.get(u, timeout=TIMEOUT).text
+                res = S.get(u, timeout=TIMEOUT)
+                
+                # EUC-KR 인코딩 명시적 디코딩 처리
+                t = res.content.decode('euc-kr', errors='ignore')
 
                 rows = re.findall(
-                    r'href="/item/main\.naver\?code=(\d{6})"[^>]*>\s*([^<]+?)\s*</a>',
+                    r'code=(\d{6})[^>]*>\s*([^<]+?)\s*</a>',
                     t
                 )
 
                 for code, name in rows:
                     name = re.sub(r"<.*?>", "", name).strip()
-                    if code not in seen and name:
+                    if code not in seen and name and len(name) > 1:
                         seen.add(code)
                         out.append({"code": code, "name": name})
 
@@ -391,7 +394,7 @@ def main():
     md = run_mode()
 
     print("====================================")
-    print(" KOREA STOCK HUNTER V8.1")
+    print(" KOREA STOCK HUNTER V8.2")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
     print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
