@@ -1,132 +1,61 @@
-name: Korea Stock Hunter V6.2
+name: Korea Stock Hunter
 
 on:
+  schedule:
+    - cron: '30 22 * * 1-5' # 예시 스케줄 (필요에 맞게 조정)
   workflow_dispatch:
     inputs:
-      mode:
-        description: "실행 모드"
+      MODE:
+        description: '실행 모드'
         required: true
-        default: "monitor"
-        type: choice
-        options:
-          - morning
-          - intraday
-          - close
-          - monitor
-
-      force_scan:
-        description: "강제 실행"
+        default: 'monitor'
+        type: string
+      FORCE_SCAN:
+        description: '강제 실행'
         required: true
         default: true
         type: boolean
 
-  schedule:
-
-    # 09:05 ~ 09:30 KST
-    - cron: '5,10,15,20,25,30 0 * * 1-5'
-
-    # 09:35 ~ 09:55 KST
-    - cron: '35,40,45,50,55 0 * * 1-5'
-
-    # 10:00 ~ 14:55 KST
-    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1,2,3,4,5 * * 1-5'
-
-    # 15:00 / 15:05 KST
-    - cron: '0,5 6 * * 1-5'
-
-    # 15:10 / 15:15 / 15:20 KST
-    - cron: '10,15,20 6 * * 1-5'
-
-
-permissions:
-  contents: write
-
-
-concurrency:
-  group: korea-stock-hunter-v62
-  cancel-in-progress: false
-
-
 jobs:
-
-  build:
-
+  run-hunter:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 25
+    permissions:
+      contents: write
 
     steps:
-
-      # ============================================
-      # CHECKOUT
-      # ============================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-
-      # ============================================
-      # PYTHON
-      # ============================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-
-      # ============================================
-      # DEPENDENCIES
-      # ============================================
+          python-version: '3.10'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          python -m pip install \
-            requests \
-            pandas \
-            numpy \
-            pytz \
-            lxml \
-            finance-datareader
-
-
-      # ============================================
-      # VERIFY
-      # ============================================
-
-      - name: Verify dependencies
-        run: |
-          python -c "import requests; print('requests OK')"
-          python -c "import pandas; print('pandas OK')"
-          python -c "import numpy; print('numpy OK')"
-          python -c "import pytz; print('pytz OK')"
-          python -c "import FinanceDataReader as fdr; print('FinanceDataReader OK')"
-
-
-      # ============================================
-      # RUN
-      # ============================================
-
-      - name: Run Korea Stock Hunter
+      - name: Run Stock Hunter
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-
-          MODE: ${{ github.event.inputs.mode }}
-          FORCE_SCAN: ${{ github.event.inputs.force_scan }}
-
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODE: ${{ github.event.inputs.MODE || 'monitor' }}
+          FORCE_SCAN: ${{ github.event.inputs.FORCE_SCAN || 'true' }}
         run: |
           python main.py
 
+      - name: Pull latest changes before commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull origin main --rebase || echo "No rebase needed or handled"
 
-      # ============================================
-      # SAVE STATE
-      # ============================================
-
-      - name: Save position state
+      - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Update Korea Stock Hunter V6.2 state"
           file_pattern: active_positions.json
+          commit_message: "Update Korea Stock Hunter state [skip ci]"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
