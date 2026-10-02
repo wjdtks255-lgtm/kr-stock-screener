@@ -1,89 +1,62 @@
 name: Korea Stock Hunter
 
+concurrency:
+  group: korea-stock-hunter
+  cancel-in-progress: false # 기존 작업이 끝날 때까지 대기시켜 데이터 파일(json) 충돌을 방지합니다.
+
 on:
   schedule:
-    - cron: '5,10,15,20,25,30 0 * * 1-5'
-    - cron: '35,40,45,50,55 0 * * 1-5'
-    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 1,2,3,4,5 * * 1-5'
-    - cron: '0,5 6 * * 1-5'
-    - cron: '10,15,20 6 * * 1-5'
-
+    - cron: '*/15 * * * 1-5' # 평일 15분 간격 실행 (너무 잦은 실행으로 인한 대기열 폭증 방지)
   workflow_dispatch:
     inputs:
       MODE:
-        description: '실행 모드'
+        description: '실행 모드 (morning, intraday, close, monitor 중 선택)'
         required: true
-        default: 'Intraday'
-        type: choice
-        options:
-          - Morning
-          - Intraday
-          - Close
-          - Monitor
+        default: 'monitor'
+        type: string
       FORCE_SCAN:
-        description: '강제 스캔'
+        description: '강제 실행 여부'
         required: true
         default: true
         type: boolean
 
-concurrency:
-  group: korea-stock-hunter
-  cancel-in-progress: false
-
 jobs:
   run-hunter:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
           cache: 'pip'
 
-      - name: Install
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Check Secrets
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: |
-          test -n "$TELEGRAM_TOKEN" || {
-            echo "ERROR: TELEGRAM_TOKEN 없음"
-            exit 1
-          }
-          test -n "$TELEGRAM_CHAT_ID" || {
-            echo "ERROR: CHAT_ID 없음"
-            exit 1
-          }
-          echo "Telegram secrets OK"
-
       - name: Run Stock Hunter
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
-          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.MODE || '' }}
-          FORCE_SCAN: ${{ github.event_name == 'workflow_dispatch' && inputs.FORCE_SCAN || '' }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MODE: ${{ github.event.inputs.MODE || 'monitor' }}
+          FORCE_SCAN: ${{ github.event.inputs.FORCE_SCAN || 'true' }}
         run: |
-          echo "===================================="
-          echo " KOREA STOCK HUNTER"
-          echo "===================================="
-          echo "Event : ${{ github.event_name }}"
-          echo "Mode  : $MODE"
-          echo "Force : $FORCE_SCAN"
-          echo "===================================="
           python main.py
 
-      - name: Commit State
+      - name: Pull latest changes before commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull origin main --rebase || echo "No rebase needed"
+
+      - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: active_positions.json
