@@ -15,7 +15,7 @@ import FinanceDataReader as fdr
 
 
 # ============================================================
-# KOREA STOCK HUNTER V6.2
+# KOREA STOCK HUNTER V6.2 (Fallback Enhanced)
 # ============================================================
 # 목적
 # 1) 장초 상승 후보
@@ -384,79 +384,92 @@ def get_realtime_quotes(codes):
 
 
 # ============================================================
-# KRX UNIVERSE
+# KRX UNIVERSE (FALLBACK ENHANCED)
 # ============================================================
 
 def get_universe():
-
     print("KRX 종목 목록 다운로드...")
 
+    # 1차 시도: FinanceDataReader 활용
     try:
         df = fdr.StockListing("KRX")
+        if df is not None and not df.empty:
+            print(f"원본 KRX universe (FDR): {len(df)}개")
 
-        if df is None or df.empty:
-            print("KRX 목록 없음")
-            return pd.DataFrame()
+            if "Code" in df.columns:
+                df["Code"] = (
+                    df["Code"]
+                    .astype(str)
+                    .str.replace(".0", "", regex=False)
+                    .str.zfill(6)
+                )
+            elif "Symbol" in df.columns:
+                df["Symbol"] = (
+                    df["Symbol"]
+                    .astype(str)
+                    .str.replace(".0", "", regex=False)
+                    .str.zfill(6)
+                )
+                df = df.rename(columns={"Symbol": "Code"})
 
-        print(
-            f"원본 KRX universe: {len(df)}개"
-        )
+            if "Name" not in df.columns:
+                df["Name"] = df["Code"]
 
-        # Code
-        if "Code" not in df.columns:
-            print("Code 컬럼 없음")
-            print(df.columns.tolist())
-            return pd.DataFrame()
+            if "Amount" in df.columns:
+                df["Amount"] = pd.to_numeric(
+                    df["Amount"],
+                    errors="coerce"
+                ).fillna(0)
+                df = df.sort_values(
+                    "Amount",
+                    ascending=False
+                )
 
-        df["Code"] = (
-            df["Code"]
-            .astype(str)
-            .str.replace(
-                ".0",
-                "",
-                regex=False
-            )
-            .str.zfill(6)
-        )
-
-        if "Name" not in df.columns:
-            df["Name"] = df["Code"]
-
-        # Amount가 있으면 거래대금 기준으로 우선 정렬
-        if "Amount" in df.columns:
-
-            df["Amount"] = pd.to_numeric(
-                df["Amount"],
-                errors="coerce"
-            ).fillna(0)
-
-            df = df.sort_values(
-                "Amount",
-                ascending=False
-            )
-
-        df = df.head(UNIVERSE_SIZE)
-
-        df = df[
-            ["Code", "Name"]
-        ].drop_duplicates(
-            subset=["Code"]
-        )
-
-        print(
-            f"KRX universe: {len(df)}개"
-        )
-
-        return df
+            df = df.head(UNIVERSE_SIZE)
+            df = df[["Code", "Name"]].drop_duplicates(subset=["Code"])
+            print(f"KRX universe 확정: {len(df)}개")
+            return df
 
     except Exception as e:
+        print(f"[UNIVERSE ERROR - FDR Failed] {repr(e)}")
 
-        print(
-            "[UNIVERSE ERROR]",
-            repr(e)
-        )
+    # 2차 시도: 네이버 금융 크롤링 Fallback (FDR 장애 대응)
+    print("네이버 금융 대체 크롤링으로 종목 목록을 구성합니다...")
+    fallback_rows = []
+    try:
+        for sosok in [0, 1]:  # 0: 코스피, 1: 코스닥
+            page = 1
+            while page <= 15:  # 상위 페이지 탐색
+                url = f"https://finance.naver.com/sise/sise_market_sum.nhn?sosok={sosok}&page={page}"
+                res = requests.get(url, headers=NAVER_HEADERS, timeout=7)
+                if res.status_code != 200:
+                    break
+                
+                html = res.text
+                matches = re.findall(r'href="/item/main\.(?:naver|nhn)\?code=(\d{6})"[^>]*>([^<]+)</a>', html)
+                
+                if not matches:
+                    break
+                
+                seen_in_page = set()
+                for code, name in matches:
+                    if code not in seen_in_page:
+                        seen_in_page.add(code)
+                        fallback_rows.append({"Code": code, "Name": name.strip()})
+                
+                page += 1
+                time.sleep(0.05)
 
-        return pd.DataFrame()
+        if fallback_rows:
+            df_fallback = pd.DataFrame(fallback_rows)
+            df_fallback = df_fallback.drop_duplicates(subset=["Code"]).head(UNIVERSE_SIZE)
+            print(f"네이버 금융 Fallback 유니버스 확보 성공: {len(df_fallback)}개")
+            return df_fallback
+
+    except Exception as ex:
+        print(f"[FALLBACK ERROR] {repr(ex)}")
+
+    return pd.DataFrame()
 
 
 # ============================================================
@@ -974,7 +987,6 @@ def get_naver_news(name, code):
 
         html = response.text
 
-        # 간단한 제목 추출
         pattern = re.compile(
             r'class="news_tit"[^>]*>'
             r'\s*([^<]+)'
@@ -1186,8 +1198,6 @@ def scan_candidates(
             ) or 0
         )
 
-        # 거래대금이 제대로 안 오면
-        # 현재가 × 거래량으로 보정
         if trading_value <= 0:
 
             trading_value = (
@@ -1573,7 +1583,6 @@ def monitor_positions(
 
             position["tp1_hit"] = True
 
-            # TP1 도달 후 SL을 진입가로 이동
             position["sl"] = entry
 
             message = (
@@ -1696,7 +1705,6 @@ def run_scan(
                 mode
             )
 
-            # 종가 후보만 실제 추적 포지션 생성
             if mode == "close":
 
                 create_position(
@@ -1705,7 +1713,6 @@ def run_scan(
                     mode
                 )
 
-        # Telegram / 뉴스 API 과도한 호출 방지
         time.sleep(1)
 
     print(
