@@ -1,93 +1,40 @@
-import os
-import json
-import time
-import re
-import requests
-import xml.etree.ElementTree as ET
-
-from datetime import datetime, timedelta
+import os,json,time,re,requests,xml.etree.ElementTree as ET
+from datetime import datetime,timedelta
 from urllib.parse import quote
 
 import pandas as pd
-import numpy as np
 import pytz
 import FinanceDataReader as fdr
 
-
 # ============================================================
-# KOREA STOCK HUNTER V6.3 (Ultimate Fallback Enhanced)
-# ============================================================
-# 목적
-# 1) 장초 상승 후보
-# 2) 장중 상승 후보
-# 3) 15:10~15:20 종가 매수 후보
-# 4) 개별 종목 Telegram 알림
-# 5) 기술적 상승 근거 표시
-# 6) 최근 뉴스/소식 표시
-# 7) 종가 후보 TP/SL 추적
+# KOREA STOCK HUNTER V6.4
 # ============================================================
 
+TOKEN=os.getenv("TELEGRAM_TOKEN","")
+CHAT_ID=os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID","")
+MODE_ENV=os.getenv("MODE","").lower().strip()
+FORCE=os.getenv("FORCE_SCAN","").lower().strip()
 
-# ============================================================
-# ENV
-# ============================================================
+STATE_FILE="active_positions.json"
+KST=pytz.timezone("Asia/Seoul")
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+UNIVERSE_SIZE=350
+HISTORY_DAYS=90
+MIN_TURNOVER=500_000_000
+TOP_SIGNAL_COUNT=3
+MIN_REALTIME=30
 
-MODE_ENV = os.environ.get("MODE", "").strip().lower()
-FORCE_SCAN_ENV = os.environ.get("FORCE_SCAN", "").strip().lower()
+SL_PCT=.05
+TP1_PCT=.03
+TP2_PCT=.06
 
-STATE_FILE = "active_positions.json"
+COOLDOWN_HOURS=4
+TIMEOUT=7
 
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-KST = pytz.timezone("Asia/Seoul")
-
-UNIVERSE_SIZE = 350
-HISTORY_DAYS = 90
-
-MIN_TURNOVER = 500_000_000
-
-TOP_SIGNAL_COUNT = 3
-
-SL_PERCENT = 0.05
-TP1_PERCENT = 0.03
-TP2_PERCENT = 0.06
-
-NEWS_DAYS = 7
-NEWS_TIMEOUT = 8
-
-REQUEST_TIMEOUT = 7
-
-SIGNAL_COOLDOWN_HOURS = 4
-
-# 실시간 데이터 최소 확보 개수
-MIN_REALTIME_DATA = 30
-
-
-# ============================================================
-# HEADERS
-# ============================================================
-
-NAVER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
-    ),
-    "Accept": "application/json,text/plain,*/*",
-    "Referer": "https://finance.naver.com/",
-}
-
-
-NEWS_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
-    )
+HEADERS={
+    "User-Agent":"Mozilla/5.0 Chrome/140 Safari/537.36",
+    "Accept":"application/json,text/plain,*/*",
+    "Referer":"https://finance.naver.com/"
 }
 
 
@@ -95,94 +42,53 @@ NEWS_HEADERS = {
 # BASIC
 # ============================================================
 
-def now_kst():
+def now():
     return datetime.now(KST)
 
-
-def fmt_money(value):
-    if value is None:
-        return "-"
-
+def money(v):
     try:
-        value = float(value)
+        v=float(v)
+        if v>=1e12:return f"{v/1e12:.2f}조원"
+        if v>=1e8:return f"{v/1e8:.1f}억원"
+        return f"{int(v):,}원"
+    except:return "-"
 
-        if value >= 1_000_000_000_000:
-            return f"{value / 1_000_000_000_000:.2f}조원"
+def price(v):
+    try:return f"{float(v):,.0f}원"
+    except:return "-"
 
-        if value >= 100_000_000:
-            return f"{value / 100_000_000:.1f}억원"
+def pct(v):
+    try:return f"{float(v):+.2f}%"
+    except:return "-"
 
-        if value >= 10_000:
-            return f"{value / 10_000:.1f}만원"
-
-        return f"{int(value):,}원"
-
-    except Exception:
-        return "-"
-
-
-def fmt_price(value):
-    try:
-        return f"{float(value):,.0f}원"
-    except Exception:
-        return "-"
-
-
-def fmt_pct(value):
-    try:
-        return f"{float(value):+.2f}%"
-    except Exception:
-        return "-"
-
-
-def clean_text(text):
-    if not text:
-        return ""
-
-    text = re.sub(r"<[^>]+>", " ", str(text))
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
+def clean(s):
+    return re.sub(r"\s+"," ",re.sub(r"<[^>]+>"," ",str(s or ""))).strip()
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("[TELEGRAM] TOKEN 또는 CHAT_ID 없음")
+def telegram(msg):
+    if not TOKEN or not CHAT_ID:
+        print("[TELEGRAM] TOKEN/CHAT_ID 없음")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True,
-    }
-
     try:
-        response = requests.post(
-            url,
-            json=payload,
+        r=requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={
+                "chat_id":CHAT_ID,
+                "text":msg,
+                "disable_web_page_preview":True
+            },
             timeout=15
         )
-
-        if response.ok:
-            print("[TELEGRAM] 전송 성공")
-            return True
-
-        print(
-            "[TELEGRAM] 전송 실패:",
-            response.status_code,
-            response.text[:300]
-        )
-
+        print("[TELEGRAM]",r.status_code)
+        return r.ok
     except Exception as e:
-        print("[TELEGRAM] ERROR:", e)
-
-    return False
+        print("[TELEGRAM ERROR]",e)
+        return False
 
 
 # ============================================================
@@ -190,705 +96,303 @@ def send_telegram(message):
 # ============================================================
 
 def load_state():
-    default_state = {
-        "positions": {},
-        "sent_signals": {},
-        "last_run": "",
-    }
+    default={"positions":{},"sent_signals":{},"last_run":""}
 
     if not os.path.exists(STATE_FILE):
-        return default_state
+        return default
 
     try:
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            state = json.load(f)
+        with open(STATE_FILE,encoding="utf-8") as f:
+            s=json.load(f)
 
-        if not isinstance(state, dict):
-            return default_state
+        if not isinstance(s,dict):
+            return default
 
-        state.setdefault("positions", {})
-        state.setdefault("sent_signals", {})
-        state.setdefault("last_run", "")
+        s.setdefault("positions",{})
+        s.setdefault("sent_signals",{})
+        s.setdefault("last_run","")
+        return s
+    except:
+        return default
 
-        return state
+def save_state(s):
+    with open(STATE_FILE,"w",encoding="utf-8") as f:
+        json.dump(s,f,ensure_ascii=False,indent=2)
 
-    except Exception as e:
-        print("[STATE] LOAD ERROR:", e)
-        return default_state
+def recent_signal(state,code,mode):
+    raw=state.get("sent_signals",{}).get(f"{mode}:{code}")
+    if not raw:return False
 
-
-def save_state(state):
     try:
-        with open(
-            STATE_FILE,
-            "w",
-            encoding="utf-8"
-        ) as f:
-            json.dump(
-                state,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
-
-        print("[STATE] 저장 완료")
-
-    except Exception as e:
-        print("[STATE] SAVE ERROR:", e)
-
-
-# ============================================================
-# DUPLICATE SIGNAL CONTROL
-# ============================================================
-
-def signal_recent(state, code, mode):
-    key = f"{mode}:{code}"
-
-    raw = state.get("sent_signals", {}).get(key)
-
-    if not raw:
+        return now()-datetime.fromisoformat(raw)<timedelta(hours=COOLDOWN_HOURS)
+    except:
         return False
 
-    try:
-        old_time = datetime.fromisoformat(raw)
-        current = now_kst()
-
-        diff = current - old_time
-
-        return diff < timedelta(hours=SIGNAL_COOLDOWN_HOURS)
-
-    except Exception:
-        return False
-
-
-def mark_signal(state, code, mode):
-    key = f"{mode}:{code}"
-
-    state.setdefault("sent_signals", {})
-    state["sent_signals"][key] = now_kst().isoformat()
+def mark_signal(state,code,mode):
+    state.setdefault("sent_signals",{})[f"{mode}:{code}"]=now().isoformat()
 
 
 # ============================================================
-# REALTIME NAVER
+# UNIVERSE
 # ============================================================
 
-def get_one_realtime(code, retry=2):
+def format_universe(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-    url = (
-        "https://polling.finance.naver.com/"
-        f"api/realtime/domestic/stock/{code}"
+    if "Code" not in df.columns:
+        if "Symbol" in df.columns:
+            df=df.rename(columns={"Symbol":"Code"})
+        else:
+            return pd.DataFrame()
+
+    df["Code"]=(
+        df["Code"].astype(str)
+        .str.replace(".0","",regex=False)
+        .str.zfill(6)
     )
 
-    for attempt in range(retry + 1):
+    if "Name" not in df.columns:
+        df["Name"]=df["Code"]
 
-        try:
-            response = requests.get(
-                url,
-                headers=NAVER_HEADERS,
-                timeout=REQUEST_TIMEOUT
-            )
+    if "Amount" in df.columns:
+        df["Amount"]=pd.to_numeric(
+            df["Amount"],errors="coerce"
+        ).fillna(0)
+        df=df.sort_values("Amount",ascending=False)
 
-            if response.status_code != 200:
-                time.sleep(0.5)
-                continue
-
-            data = response.json()
-
-            datas = data.get("datas", [])
-
-            if not datas:
-                time.sleep(0.5)
-                continue
-
-            item = datas[0]
-
-            def num(key):
-                value = item.get(key)
-
-                try:
-                    return float(value)
-                except Exception:
-                    return None
-
-            return {
-                "code": code,
-                "price": num("closePrice"),
-                "change_pct": num("fluctuationsRatio"),
-                "change_price": num(
-                    "compareToPreviousClosePrice"
-                ),
-                "previous_close": num(
-                    "previousClosePrice"
-                ),
-                "volume": num(
-                    "accumulatedTradingVolume"
-                ),
-                "trading_value": num(
-                    "accumulatedTradingValue"
-                ),
-                "open": num("openPrice"),
-                "high": num("highPrice"),
-                "low": num("lowPrice"),
-                "market_status": item.get(
-                    "marketStatus"
-                ),
-            }
-
-        except Exception as e:
-            if attempt == retry:
-                print(
-                    f"[REALTIME ERROR] {code}: {e}"
-                )
-
-            time.sleep(0.5)
-
-    return None
-
-
-def get_realtime_quotes(codes):
-
-    result = {}
-
-    total = len(codes)
-
-    print(
-        f"실시간 시세 조회 시작: {total}개"
-    )
-
-    for idx, code in enumerate(codes, 1):
-
-        quote_data = get_one_realtime(code)
-
-        if quote_data and quote_data.get("price"):
-            result[code] = quote_data
-
-        if idx % 50 == 0:
-            print(
-                f"실시간 조회 진행: "
-                f"{idx}/{total} "
-                f"성공 {len(result)}"
-            )
-
-        time.sleep(0.08)
-
-    print(
-        f"실시간 데이터: "
-        f"{len(result)}/{total}개"
-    )
-
-    return result
-
-
-# ============================================================
-# KRX UNIVERSE (ULTIMATE FALLBACK ENHANCED)
-# ============================================================
+    return df[["Code","Name"]].drop_duplicates("Code").head(UNIVERSE_SIZE)
 
 def get_universe():
-    print("KRX 종목 목록 다운로드 시도...")
+    print("KRX 종목 목록 다운로드...")
 
-    # 1차 시도: FinanceDataReader 활용
     try:
-        df = fdr.StockListing("KRX")
-        if df is not None and not df.empty:
-            print(f"원본 KRX universe (FDR): {len(df)}개")
-            return _format_universe_df(df)
+        df=format_universe(fdr.StockListing("KRX"))
+        if not df.empty:
+            print(f"KRX universe: {len(df)}개")
+            return df
     except Exception as e:
-        print(f"[UNIVERSE ERROR - FDR Failed] {repr(e)}")
+        print("[FDR]",e)
 
-    # 2차 시도: KRX 정보데이터시스템 직접 다운로드 (API 우회 방식)
     try:
-        print("KRX 직접 데이터 연동 시도...")
-        url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-        df_list = pd.read_html(url, header=0, encoding='cp949')
-        if df_list:
-            df = df_list[0]
-            df['Code'] = df['종목코드'].astype(str).str.zfill(6)
-            df['Name'] = df['회사명']
-            df = df[['Code', 'Name']].drop_duplicates(subset=["Code"])
-            if not df.empty:
-                print(f"KRX 직접 연동 성공: {len(df)}개")
-                return df.head(UNIVERSE_SIZE)
-    except Exception as e2:
-        print(f"[FALLBACK ERROR - KRX Direct Failed] {repr(e2)}")
-
-    # 3차 시도: 네이버 모바일 증권 API 우회 방식
-    try:
-        print("네이버 모바일 JSON API로 종목 목록 구성 시도...")
-        rows = []
-        for market in ["KOSPI", "KOSDAQ"]:
-            url = f"https://m.stock.naver.com/api/list/stocks/marketCapitalization.json?market={market}&pageSize=300"
-            res = requests.get(url, headers=NAVER_HEADERS, timeout=7)
-            if res.status_code == 200:
-                data = res.json()
-                stocks = data.get("result", {}).get("stocks", [])
-                for s in stocks:
-                    code = s.get("itemCode")
-                    name = s.get("stockName")
-                    if code and name:
-                        rows.append({"Code": code, "Name": name})
-        
-        if rows:
-            df_mob = pd.DataFrame(rows).drop_duplicates(subset=["Code"])
-            print(f"네이버 모바일 API 유니버스 확보 성공: {len(df_mob)}개")
-            return df_mob.head(UNIVERSE_SIZE)
-            
-    except Exception as e3:
-        print(f"[FALLBACK ERROR - Naver Mobile API Failed] {repr(e3)}")
+        url="https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+        df=pd.read_html(url,header=0,encoding="cp949")[0]
+        df["Code"]=df["종목코드"].astype(str).str.zfill(6)
+        df["Name"]=df["회사명"]
+        df=df[["Code","Name"]].drop_duplicates("Code")
+        print(f"KRX fallback: {len(df)}개")
+        return df.head(UNIVERSE_SIZE)
+    except Exception as e:
+        print("[KRX FALLBACK]",e)
 
     return pd.DataFrame()
 
 
-def _format_universe_df(df):
-    if "Code" in df.columns:
-        df["Code"] = (
-            df["Code"]
-            .astype(str)
-            .str.replace(".0", "", regex=False)
-            .str.zfill(6)
-        )
-    elif "Symbol" in df.columns:
-        df["Symbol"] = (
-            df["Symbol"]
-            .astype(str)
-            .str.replace(".0", "", regex=False)
-            .str.zfill(6)
-        )
-        df = df.rename(columns={"Symbol": "Code"})
+# ============================================================
+# REALTIME
+# ============================================================
 
-    if "Name" not in df.columns:
-        df["Name"] = df["Code"]
+def realtime_one(code):
+    url=f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
 
-    if "Amount" in df.columns:
-        df["Amount"] = pd.to_numeric(
-            df["Amount"],
-            errors="coerce"
-        ).fillna(0)
-        df = df.sort_values(
-            "Amount",
-            ascending=False
-        )
+    for _ in range(3):
+        try:
+            r=requests.get(url,headers=HEADERS,timeout=TIMEOUT)
+            if r.status_code!=200:
+                time.sleep(.4)
+                continue
 
-    df = df.head(UNIVERSE_SIZE)
-    df = df[["Code", "Name"]].drop_duplicates(subset=["Code"])
-    print(f"KRX universe 확정: {len(df)}개")
-    return df
+            ds=r.json().get("datas",[])
+            if not ds:
+                time.sleep(.4)
+                continue
+
+            x=ds[0]
+
+            def n(k):
+                try:return float(x.get(k))
+                except:return 0
+
+            return {
+                "price":n("closePrice"),
+                "change":n("fluctuationsRatio"),
+                "volume":n("accumulatedTradingVolume"),
+                "value":n("accumulatedTradingValue"),
+                "open":n("openPrice"),
+                "high":n("highPrice"),
+                "low":n("lowPrice")
+            }
+        except Exception:
+            time.sleep(.4)
+
+    return None
+
+def realtime(codes):
+    out={}
+    print(f"실시간 시세 조회: {len(codes)}개")
+
+    for i,code in enumerate(codes,1):
+        q=realtime_one(code)
+
+        if q and q["price"]>0:
+            out[code]=q
+
+        if i%50==0:
+            print(f"진행 {i}/{len(codes)} / 성공 {len(out)}")
+
+        time.sleep(.08)
+
+    print(f"실시간 데이터: {len(out)}/{len(codes)}개")
+    return out
 
 
 # ============================================================
 # HISTORY
 # ============================================================
 
-def get_history(code):
-
-    end = datetime.now()
-
-    start = end - timedelta(
-        days=HISTORY_DAYS
-    )
-
+def history(code):
     try:
+        end=datetime.now()
+        start=end-timedelta(days=HISTORY_DAYS)
 
-        df = fdr.DataReader(
+        df=fdr.DataReader(
             code,
             start.strftime("%Y-%m-%d"),
             end.strftime("%Y-%m-%d")
         )
 
-        if df is None or df.empty:
+        if df is None or len(df)<25:
             return None
-
-        df = df.copy()
-
-        required = [
-            "Close",
-            "Volume",
-        ]
-
-        for col in required:
-            if col not in df.columns:
-                return None
 
         return df
-
     except Exception as e:
-
-        print(
-            f"[HISTORY ERROR] {code}: {e}"
-        )
-
+        print("[HISTORY]",code,e)
         return None
 
 
 # ============================================================
-# TECHNICAL ANALYSIS
+# TECHNICAL
 # ============================================================
 
-def analyze_stock(code, name, quote, history):
-
-    if history is None:
-        return None
-
-    if len(history) < 25:
-        return None
-
+def analyze(code,name,q,df):
     try:
+        close=pd.to_numeric(df["Close"],errors="coerce").dropna()
+        vol=pd.to_numeric(df["Volume"],errors="coerce").reindex(close.index).fillna(0)
 
-        df = history.copy()
+        if len(close)<25:return None
 
-        close = pd.to_numeric(
-            df["Close"],
-            errors="coerce"
-        )
+        p=float(q["price"])
+        ch=float(q["change"])
+        v=float(q["volume"])
 
-        volume = pd.to_numeric(
-            df["Volume"],
-            errors="coerce"
-        )
+        value=float(q["value"] or 0)
+        if value<=0:value=p*v
 
-        close = close.dropna()
-        volume = volume.reindex(
-            close.index
-        ).fillna(0)
+        ma5=close.rolling(5).mean().iloc[-1]
+        ma20=close.rolling(20).mean().iloc[-1]
+        ma60=close.rolling(60).mean().iloc[-1]
 
-        if len(close) < 25:
-            return None
+        avgv=vol.rolling(20).mean().iloc[-1]
+        vr=v/avgv if avgv>0 else 0
 
-        current_price = float(
-            quote["price"]
-        )
+        h20=float(close.tail(20).max())
+        l20=float(close.tail(20).min())
 
-        current_change = float(
-            quote.get("change_pct") or 0
-        )
+        pos=(p-l20)/(h20-l20) if h20>l20 else .5
+        high_gap=(p/h20-1)*100 if h20 else 0
 
-        current_volume = float(
-            quote.get("volume") or 0
-        )
+        op=float(q["open"] or p)
+        intraday=(p/op-1)*100 if op else 0
 
-        trading_value = float(
-            quote.get("trading_value") or 0
-        )
+        score=0
+        reasons=[]
+        warnings=[]
 
-        if trading_value <= 0:
-            trading_value = (
-                current_price *
-                current_volume
-            )
+        # 추세
+        if p>ma20:
+            score+=2
+            reasons.append("현재가 20일선 위")
 
-        ma5 = close.rolling(5).mean()
-        ma20 = close.rolling(20).mean()
-        ma60 = close.rolling(60).mean()
+        if ma5>ma20:
+            score+=2
+            reasons.append("5일선이 20일선 상향 정렬")
 
-        avg_volume20 = (
-            volume.rolling(20).mean()
-        )
+        if p>ma60:
+            score+=1
+            reasons.append("중기 60일선 위")
 
-        avg_volume20_value = float(
-            avg_volume20.iloc[-1]
-        )
-
-        if avg_volume20_value <= 0:
-            volume_ratio = 0
+        # 거래량
+        if vr>=3:
+            score+=3
+            reasons.append(f"거래량 평균 대비 {vr:.2f}배")
+        elif vr>=2:
+            score+=2
+            reasons.append(f"거래량 평균 대비 {vr:.2f}배")
+        elif vr>=1.3:
+            score+=1
+            reasons.append(f"거래량 증가 {vr:.2f}배")
         else:
-            volume_ratio = (
-                current_volume /
-                avg_volume20_value
-            )
-
-        recent_high20 = float(
-            close.tail(20).max()
-        )
-
-        previous_close = float(
-            close.iloc[-1]
-        )
-
-        # 최근 종가 위치
-        recent_low20 = float(
-            close.tail(20).min()
-        )
-
-        range20 = (
-            recent_high20 -
-            recent_low20
-        )
-
-        if range20 > 0:
-            close_position = (
-                current_price -
-                recent_low20
-            ) / range20
-        else:
-            close_position = 0.5
-
-        # 최근 고점 대비 거리
-        if recent_high20 > 0:
-            high_distance_pct = (
-                (
-                    current_price /
-                    recent_high20
-                ) - 1
-            ) * 100
-        else:
-            high_distance_pct = 0
-
-        # 오늘 시가 대비
-        open_price = float(
-            quote.get("open") or current_price
-        )
-
-        if open_price > 0:
-            intraday_change = (
-                (
-                    current_price /
-                    open_price
-                ) - 1
-            ) * 100
-        else:
-            intraday_change = 0
-
-        score = 0
-        reasons = []
-        warnings = []
-
-        # ====================================================
-        # TREND
-        # ====================================================
-
-        if len(ma20.dropna()) > 0:
-
-            ma20_now = float(
-                ma20.iloc[-1]
-            )
-
-            if current_price > ma20_now:
-                score += 2
-
-                reasons.append(
-                    "현재가가 20일 이동평균선 위"
-                )
-
-            else:
-                warnings.append(
-                    "현재가가 20일선 아래"
-                )
-
-        if len(ma5.dropna()) > 0 and len(ma20.dropna()) > 0:
-
-            ma5_now = float(
-                ma5.iloc[-1]
-            )
-
-            ma20_now = float(
-                ma20.iloc[-1]
-            )
-
-            if ma5_now > ma20_now:
-
-                score += 2
-
-                reasons.append(
-                    "5일선이 20일선 위에서 상승 추세"
-                )
-
-        if len(ma60.dropna()) > 0:
-
-            ma60_now = float(
-                ma60.iloc[-1]
-            )
-
-            if current_price > ma60_now:
-
-                score += 1
-
-                reasons.append(
-                    "중기 60일선 위"
-                )
-
-        # ====================================================
-        # VOLUME
-        # ====================================================
-
-        if volume_ratio >= 3.0:
-
-            score += 3
-
-            reasons.append(
-                f"거래량이 20일 평균 대비 "
-                f"{volume_ratio:.2f}배 증가"
-            )
-
-        elif volume_ratio >= 2.0:
-
-            score += 2
-
-            reasons.append(
-                f"거래량이 평균 대비 "
-                f"{volume_ratio:.2f}배 증가"
-            )
-
-        elif volume_ratio >= 1.3:
-
-            score += 1
-
-            reasons.append(
-                f"거래량 증가 "
-                f"{volume_ratio:.2f}배"
-            )
-
-        else:
-
-            warnings.append(
-                "거래량 증가폭 제한적"
-            )
-
-        # ====================================================
-        # PRICE MOMENTUM
-        # ====================================================
-
-        if current_change >= 7:
-
-            score += 2
-
-            reasons.append(
-                f"당일 강한 상승 "
-                f"{current_change:+.2f}%"
-            )
-
-        elif current_change >= 3:
-
-            score += 1
-
-            reasons.append(
-                f"당일 상승 모멘텀 "
-                f"{current_change:+.2f}%"
-            )
-
-        # ====================================================
-        # CLOSE POSITION
-        # ====================================================
-
-        if close_position >= 0.80:
-
-            score += 2
-
-            reasons.append(
-                "최근 20일 가격 범위의 "
-                "고가권에서 마감"
-            )
-
-        elif close_position >= 0.65:
-
-            score += 1
-
-            reasons.append(
-                "최근 가격 범위 상단권"
-            )
-
-        # ====================================================
-        # 20D HIGH
-        # ====================================================
-
-        if current_price >= recent_high20:
-
-            score += 3
-
-            reasons.append(
-                "최근 20일 고점 돌파"
-            )
-
-        elif high_distance_pct >= -2:
-
-            score += 1
-
-            reasons.append(
-                "최근 20일 고점 근접"
-            )
-
-        # ====================================================
-        # INTRADAY STRENGTH
-        # ====================================================
-
-        if intraday_change >= 3:
-
-            score += 1
-
-            reasons.append(
-                f"시가 대비 상승 "
-                f"{intraday_change:+.2f}%"
-            )
-
-        # ====================================================
-        # OVERHEAT WARNING
-        # ====================================================
-
-        if current_change >= 15:
-
-            warnings.append(
-                "당일 +15% 이상 급등으로 "
-                "추격매수 과열 주의"
-            )
-
-        elif current_change >= 10:
-
-            warnings.append(
-                "당일 +10% 이상 급등 상태"
-            )
-
-        elif current_change >= 7:
-
-            warnings.append(
-                "단기 급등에 따른 변동성 주의"
-            )
-
-        # ====================================================
-        # TURNOVER
-        # ====================================================
-
-        if trading_value >= 50_000_000_000:
-
-            score += 2
-
-            reasons.append(
-                f"거래대금 {fmt_money(trading_value)}"
-            )
-
-        elif trading_value >= 10_000_000_000:
-
-            score += 1
-
-            reasons.append(
-                f"거래대금 {fmt_money(trading_value)}"
-            )
+            warnings.append("거래량 증가폭 제한적")
+
+        # 상승 모멘텀
+        if ch>=7:
+            score+=2
+            reasons.append(f"당일 강한 상승 {ch:+.2f}%")
+        elif ch>=3:
+            score+=1
+            reasons.append(f"당일 상승 모멘텀 {ch:+.2f}%")
+
+        # 가격 위치
+        if pos>=.8:
+            score+=2
+            reasons.append("최근 20일 가격 상단권")
+        elif pos>=.65:
+            score+=1
+            reasons.append("최근 가격 범위 상단권")
+
+        # 고점
+        if p>=h20:
+            score+=3
+            reasons.append("최근 20일 고점 돌파")
+        elif high_gap>=-2:
+            score+=1
+            reasons.append("최근 20일 고점 근접")
+
+        # 장중 강도
+        if intraday>=3:
+            score+=1
+            reasons.append(f"시가 대비 {intraday:+.2f}%")
+
+        # 거래대금
+        if value>=50_000_000_000:
+            score+=2
+            reasons.append(f"거래대금 {money(value)}")
+        elif value>=10_000_000_000:
+            score+=1
+            reasons.append(f"거래대금 {money(value)}")
+
+        # 과열
+        if ch>=15:
+            warnings.append("당일 +15% 이상 급등")
+        elif ch>=10:
+            warnings.append("당일 +10% 이상 급등")
+        elif ch>=7:
+            warnings.append("단기 급등 변동성 주의")
 
         return {
-            "code": code,
-            "name": name,
-            "price": current_price,
-            "change_pct": current_change,
-            "trading_value": trading_value,
-            "volume": current_volume,
-            "volume_ratio": volume_ratio,
-            "score": score,
-            "reasons": reasons,
-            "warnings": warnings,
-            "close_position": close_position,
-            "recent_high20": recent_high20,
-            "high_distance_pct": high_distance_pct,
-            "intraday_change": intraday_change,
+            "code":code,
+            "name":name,
+            "price":p,
+            "change":ch,
+            "value":value,
+            "vr":vr,
+            "score":score,
+            "reasons":reasons,
+            "warnings":warnings
         }
 
     except Exception as e:
-
-        print(
-            f"[ANALYSIS ERROR] "
-            f"{code} {name}: {e}"
-        )
-
+        print("[ANALYZE]",code,e)
         return None
 
 
@@ -896,196 +400,249 @@ def analyze_stock(code, name, quote, history):
 # NEWS
 # ============================================================
 
-def get_google_news(name, code):
-
-    query = quote(
-        f'"{name}" "{code}"'
-    )
-
-    url = (
+def news(name,code):
+    url=(
         "https://news.google.com/rss/search?"
-        f"q={query}"
-        "&hl=ko"
-        "&gl=KR"
-        "&ceid=KR:ko"
+        f"q={quote(f'{name} {code}')}"
+        "&hl=ko&gl=KR&ceid=KR:ko"
     )
 
     try:
-
-        response = requests.get(
+        r=requests.get(
             url,
-            headers=NEWS_HEADERS,
-            timeout=NEWS_TIMEOUT
+            headers=HEADERS,
+            timeout=8
         )
 
-        if response.status_code != 200:
+        if r.status_code!=200:
             return []
 
-        root = ET.fromstring(
-            response.content
-        )
+        root=ET.fromstring(r.content)
+        result=[]
 
-        results = []
-
-        for item in root.findall(".//item"):
-
-            title = item.findtext(
-                "title"
-            )
-
-            link = item.findtext(
-                "link"
-            )
-
-            pub_date = item.findtext(
-                "pubDate"
-            )
-
-            source = item.findtext(
-                "source"
-            )
-
-            title = clean_text(title)
-
-            if not title:
-                continue
-
-            results.append({
-                "title": title,
-                "link": link or "",
-                "pub_date": pub_date or "",
-                "source": clean_text(source),
-            })
-
-            if len(results) >= 3:
-                break
-
-        return results
-
-    except Exception as e:
-
-        print(
-            f"[NEWS ERROR] "
-            f"{name}: {e}"
-        )
-
-        return []
-
-
-def get_naver_news(name, code):
-
-    url = (
-        "https://search.naver.com/"
-        "search.naver"
-        f"?where=news&query={quote(name)}"
-    )
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=NEWS_HEADERS,
-            timeout=NEWS_TIMEOUT
-        )
-
-        if response.status_code != 200:
-            return []
-
-        html = response.text
-
-        pattern = re.compile(
-            r'class="news_tit"[^>]*>'
-            r'\s*([^<]+)'
-        )
-
-        titles = pattern.findall(
-            html
-        )
-
-        results = []
-
-        for title in titles[:3]:
-
-            title = clean_text(title)
+        for x in root.findall(".//item")[:3]:
+            title=clean(x.findtext("title"))
+            source=clean(x.findtext("source"))
 
             if title:
-                results.append({
-                    "title": title,
-                    "link": "",
-                    "pub_date": "",
-                    "source": "Naver News",
-                })
+                result.append(
+                    f"{title}"
+                    + (f" ({source})" if source else "")
+                )
 
-        return results
+        return result[:2]
 
     except Exception as e:
-
-        print(
-            f"[NAVER NEWS ERROR] "
-            f"{name}: {e}"
-        )
-
+        print("[NEWS]",name,e)
         return []
 
 
-def get_recent_news(name, code):
+# ============================================================
+# MESSAGE
+# ============================================================
 
-    news = get_google_news(
-        name,
-        code
+def mode_name(mode):
+    return {
+        "morning":"장초 상승 후보",
+        "intraday":"장중 상승 후보",
+        "close":"15:20 종가 후보"
+    }.get(mode,"주식 후보")
+
+def message(c,mode):
+    p=c["price"]
+
+    sl=p*(1-SL_PCT)
+    tp1=p*(1+TP1_PCT)
+    tp2=p*(1+TP2_PCT)
+
+    ns=news(c["name"],c["code"])
+
+    m=(
+        f"🚨 [{mode_name(mode)}]\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 {c['name']} ({c['code']})\n\n"
+        f"💰 현재가: {price(p)}\n"
+        f"📈 등락률: {pct(c['change'])}\n"
+        f"🔥 거래대금: {money(c['value'])}\n"
+        f"📊 거래량: {c['vr']:.2f}배\n"
+        f"⭐ 기술점수: {c['score']}\n\n"
+        f"🟢 진입 기준: {price(p)}\n"
+        f"🛡️ SL: {price(sl)}\n"
+        f"🎯 TP1: {price(tp1)}\n"
+        f"🎯 TP2: {price(tp2)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 상승 근거\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
     )
 
-    if news:
-        return news
+    for x in c["reasons"][:6]:
+        m+=f"• {x}\n"
 
-    return get_naver_news(
-        name,
-        code
+    m+="\n📰 최근 뉴스/소식\n━━━━━━━━━━━━━━━━━━\n"
+
+    if ns:
+        for x in ns:
+            m+=f"• {x}\n"
+    else:
+        m+="• 최근 주요 뉴스/소식 확인 안 됨\n"
+
+    if c["warnings"]:
+        m+=(
+            "\n⚠️ 주의사항\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+        )
+        for x in c["warnings"][:3]:
+            m+=f"• {x}\n"
+
+    m+=(
+        "\n🔗 네이버 차트\n"
+        f"https://finance.naver.com/item/main.naver?code={c['code']}\n\n"
+        "ℹ️ 기술적 조건과 뉴스/소식을 "
+        "종합해 표시한 참고용 신호입니다."
     )
+
+    return m
 
 
 # ============================================================
-# NEWS REASON
+# POSITION
 # ============================================================
 
-def make_news_reason(news):
+def add_position(state,c,mode):
+    p=c["price"]
 
-    if not news:
+    state["positions"][c["code"]]={
+        "code":c["code"],
+        "name":c["name"],
+        "direction":"LONG",
+        "entry":p,
+        "sl":p*(1-SL_PCT),
+        "tp1":p*(1+TP1_PCT),
+        "tp2":p*(1+TP2_PCT),
+        "tp1_hit":False,
+        "mode":mode,
+        "created_at":now().isoformat()
+    }
 
-        return [
-            "최근 주요 뉴스/소식이 "
-            "검색되지 않음"
-        ]
+def monitor(state,quotes):
+    positions=state.get("positions",{})
 
-    reasons = []
+    if not positions:
+        print("추적 포지션 없음")
+        return
 
-    for item in news[:2]:
+    print(f"기존 포지션 {len(positions)}개 모니터링")
 
-        title = item.get(
-            "title",
-            ""
-        )
+    remove=[]
 
-        source = item.get(
-            "source",
-            ""
-        )
+    for code,pos in list(positions.items()):
+        q=quotes.get(code)
 
-        if len(title) > 85:
-            title = title[:82] + "..."
+        if not q:
+            continue
 
-        if source:
-            reasons.append(
-                f"{title} "
-                f"({source})"
+        p=q["price"]
+        entry=pos["entry"]
+        sl=pos["sl"]
+        tp1=pos["tp1"]
+        tp2=pos["tp2"]
+        name=pos["name"]
+
+        if p<=sl:
+            telegram(
+                f"🛑 [주식 SL 도달]\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 {name} ({code})\n"
+                f"💰 현재가: {price(p)}\n"
+                f"🛡️ SL: {price(sl)}\n"
+                f"🟢 진입가: {price(entry)}\n\n"
+                f"추적 종료"
+            )
+            remove.append(code)
+            continue
+
+        if p>=tp2:
+            telegram(
+                f"🎯 [주식 TP2 도달]\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 {name} ({code})\n"
+                f"💰 현재가: {price(p)}\n"
+                f"🎯 TP2: {price(tp2)}\n"
+                f"🟢 진입가: {price(entry)}\n\n"
+                f"추적 종료"
+            )
+            remove.append(code)
+            continue
+
+        if p>=tp1 and not pos.get("tp1_hit"):
+            pos["tp1_hit"]=True
+            pos["sl"]=entry
+
+            telegram(
+                f"🎯 [주식 TP1 도달]\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 {name} ({code})\n"
+                f"💰 현재가: {price(p)}\n"
+                f"🎯 TP1: {price(tp1)}\n\n"
+                f"🛡️ SL → 진입가 {price(entry)}\n"
+                f"손익분기점 보호 모드"
             )
 
-        else:
-            reasons.append(
-                title
-            )
+    for code in remove:
+        positions.pop(code,None)
 
-    return reasons
+
+# ============================================================
+# SCAN
+# ============================================================
+
+def threshold(mode):
+    return {
+        "morning":7,
+        "intraday":8,
+        "close":9
+    }.get(mode,999)
+
+def scan(state,universe,quotes,mode):
+    results=[]
+    limit=threshold(mode)
+
+    print(f"{mode.upper()} SCAN / threshold {limit}")
+
+    for _,row in universe.iterrows():
+        code=str(row["Code"]).zfill(6)
+        name=str(row["Name"])
+
+        q=quotes.get(code)
+        if not q or q["price"]<=0:
+            continue
+
+        if q["value"]<=0:
+            q["value"]=q["price"]*q["volume"]
+
+        if q["value"]<MIN_TURNOVER:
+            continue
+
+        df=history(code)
+        if df is None:
+            continue
+
+        c=analyze(code,name,q,df)
+
+        if c and c["score"]>=limit:
+            results.append(c)
+
+    results.sort(
+        key=lambda x:(
+            x["score"],
+            x["vr"],
+            x["value"],
+            x["change"]
+        ),
+        reverse=True
+    )
+
+    return results[:TOP_SIGNAL_COUNT]
 
 
 # ============================================================
@@ -1093,638 +650,23 @@ def make_news_reason(news):
 # ============================================================
 
 def get_mode():
-
-    manual_modes = {
-        "morning",
-        "intraday",
-        "close",
-        "monitor",
-    }
-
-    if (
-        MODE_ENV in manual_modes
-        and FORCE_SCAN_ENV in {
-            "",
-            "true",
-            "1",
-            "yes",
-        }
-    ):
-
+    if MODE_ENV in {
+        "morning","intraday","close","monitor"
+    } and FORCE in {"","true","1","yes"}:
         return MODE_ENV
 
-    now = now_kst()
+    t=now().hour*60+now().minute
 
-    hhmm = (
-        now.hour * 60 +
-        now.minute
-    )
-
-    # 09:00 ~ 09:30
-    if 540 <= hhmm <= 570:
+    if 540<=t<=570:
         return "morning"
 
-    # 09:31 ~ 15:05
-    if 571 <= hhmm <= 905:
+    if 571<=t<=905:
         return "intraday"
 
-    # 15:10 ~ 15:20
-    if 910 <= hhmm <= 920:
+    if 910<=t<=920:
         return "close"
 
     return "monitor"
-
-
-# ============================================================
-# SCORE THRESHOLD
-# ============================================================
-
-def get_threshold(mode):
-
-    if mode == "morning":
-        return 7
-
-    if mode == "intraday":
-        return 8
-
-    if mode == "close":
-        return 9
-
-    return 999
-
-
-# ============================================================
-# SCAN
-# ============================================================
-
-def scan_candidates(
-    universe,
-    quotes,
-    mode
-):
-
-    candidates = []
-
-    threshold = get_threshold(
-        mode
-    )
-
-    total = len(universe)
-
-    print(
-        f"{mode.upper()} SCAN "
-        f"threshold={threshold}"
-    )
-
-    for idx, row in universe.iterrows():
-
-        code = str(
-            row["Code"]
-        ).zfill(6)
-
-        name = str(
-            row["Name"]
-        )
-
-        quote = quotes.get(code)
-
-        if not quote:
-            continue
-
-        price = quote.get(
-            "price"
-        )
-
-        if not price or price <= 0:
-            continue
-
-        trading_value = float(
-            quote.get(
-                "trading_value"
-            ) or 0
-        )
-
-        if trading_value <= 0:
-
-            trading_value = (
-                float(price) *
-                float(
-                    quote.get(
-                        "volume"
-                    ) or 0
-                )
-            )
-
-            quote["trading_value"] = (
-                trading_value
-            )
-
-        if trading_value < MIN_TURNOVER:
-            continue
-
-        history = get_history(
-            code
-        )
-
-        if history is None:
-            continue
-
-        result = analyze_stock(
-            code,
-            name,
-            quote,
-            history
-        )
-
-        if result is None:
-            continue
-
-        if result["score"] < threshold:
-            continue
-
-        candidates.append(
-            result
-        )
-
-        if idx % 30 == 0:
-            print(
-                f"분석 진행: "
-                f"{idx}/{total}"
-            )
-
-    candidates.sort(
-        key=lambda x: (
-            x["score"],
-            x["volume_ratio"],
-            x["trading_value"],
-            x["change_pct"],
-        ),
-        reverse=True
-    )
-
-    return candidates[
-        :TOP_SIGNAL_COUNT
-    ]
-
-
-# ============================================================
-# TELEGRAM MESSAGE
-# ============================================================
-
-def mode_title(mode):
-
-    if mode == "morning":
-        return "09시 장초 상승 후보"
-
-    if mode == "intraday":
-        return "장중 상승 후보"
-
-    if mode == "close":
-        return "15:20 종가 후보"
-
-    return "주식 포지션"
-
-
-def build_candidate_message(
-    candidate,
-    mode,
-    news
-):
-
-    code = candidate["code"]
-    name = candidate["name"]
-
-    price = candidate["price"]
-
-    sl = price * (
-        1 - SL_PERCENT
-    )
-
-    tp1 = price * (
-        1 + TP1_PERCENT
-    )
-
-    tp2 = price * (
-        1 + TP2_PERCENT
-    )
-
-    news_reasons = make_news_reason(
-        news
-    )
-
-    technical = candidate[
-        "reasons"
-    ][:6]
-
-    warnings = candidate[
-        "warnings"
-    ]
-
-    chart_url = (
-        "https://finance.naver.com/"
-        f"item/main.naver?code={code}"
-    )
-
-    message = (
-        f"🚨 [{mode_title(mode)}]\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📌 {name} ({code})\n\n"
-        f"💰 현재가: "
-        f"{fmt_price(price)}\n"
-        f"📈 등락률: "
-        f"{fmt_pct(candidate['change_pct'])}\n"
-        f"🔥 거래대금: "
-        f"{fmt_money(candidate['trading_value'])}\n"
-        f"📊 거래량비율: "
-        f"{candidate['volume_ratio']:.2f}배\n"
-        f"⭐ 기술점수: "
-        f"{candidate['score']}\n\n"
-        f"🟢 진입 기준: "
-        f"{fmt_price(price)}\n"
-        f"🛡️ SL: "
-        f"{fmt_price(sl)}\n"
-        f"🎯 TP1: "
-        f"{fmt_price(tp1)}\n"
-        f"🎯 TP2: "
-        f"{fmt_price(tp2)}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 상승 근거\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-    )
-
-    if technical:
-
-        for reason in technical:
-
-            message += (
-                f"• {reason}\n"
-            )
-
-    else:
-
-        message += (
-            "• 주요 기술적 근거 확인 필요\n"
-        )
-
-    message += (
-        "\n📰 최근 뉴스/소식\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-    )
-
-    for reason in news_reasons:
-
-        message += (
-            f"• {reason}\n"
-        )
-
-    if warnings:
-
-        message += (
-            "\n⚠️ 주의사항\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-        )
-
-        for warning in warnings[:3]:
-
-            message += (
-                f"• {warning}\n"
-            )
-
-    message += (
-        "\n🔗 네이버 차트\n"
-        f"{chart_url}\n\n"
-        "ℹ️ 기술적 조건과 최근 뉴스/소식을 "
-        "함께 표시한 참고용 신호입니다."
-    )
-
-    return message
-
-
-# ============================================================
-# POSITION MANAGEMENT
-# ============================================================
-
-def create_position(
-    state,
-    candidate,
-    mode
-):
-
-    code = candidate["code"]
-
-    entry = float(
-        candidate["price"]
-    )
-
-    sl = entry * (
-        1 - SL_PERCENT
-    )
-
-    tp1 = entry * (
-        1 + TP1_PERCENT
-    )
-
-    tp2 = entry * (
-        1 + TP2_PERCENT
-    )
-
-    state["positions"][code] = {
-        "code": code,
-        "name": candidate["name"],
-        "direction": "LONG",
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp1_hit": False,
-        "mode": mode,
-        "created_at": now_kst().isoformat(),
-    }
-
-    print(
-        f"[POSITION] "
-        f"{candidate['name']} "
-        f"ENTRY={entry}"
-    )
-
-
-# ============================================================
-# POSITION MONITOR
-# ============================================================
-
-def monitor_positions(
-    state,
-    quotes
-):
-
-    positions = state.get(
-        "positions",
-        {}
-    )
-
-    if not positions:
-
-        print(
-            "추적 포지션 없음"
-        )
-
-        return
-
-    print(
-        f"기존 포지션 "
-        f"{len(positions)}개 모니터링"
-    )
-
-    remove_codes = []
-
-    for code, position in list(
-        positions.items()
-    ):
-
-        quote = quotes.get(code)
-
-        if not quote:
-
-            print(
-                f"[MONITOR] "
-                f"{code} 실시간 데이터 없음"
-            )
-
-            continue
-
-        current_price = float(
-            quote["price"]
-        )
-
-        entry = float(
-            position["entry"]
-        )
-
-        sl = float(
-            position["sl"]
-        )
-
-        tp1 = float(
-            position["tp1"]
-        )
-
-        tp2 = float(
-            position["tp2"]
-        )
-
-        name = position.get(
-            "name",
-            code
-        )
-
-        # ================================================
-        # SL
-        # ================================================
-
-        if current_price <= sl:
-
-            message = (
-                "🛑 [주식 손절 알림]\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"📌 {name} ({code})\n\n"
-                f"💰 현재가: "
-                f"{fmt_price(current_price)}\n"
-                f"🛡️ SL: "
-                f"{fmt_price(sl)}\n"
-                f"🟢 진입가: "
-                f"{fmt_price(entry)}\n\n"
-                "포지션 추적 종료"
-            )
-
-            send_telegram(
-                message
-            )
-
-            remove_codes.append(
-                code
-            )
-
-            continue
-
-        # ================================================
-        # TP2
-        # ================================================
-
-        if current_price >= tp2:
-
-            message = (
-                "🎯 [주식 TP2 도달]\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"📌 {name} ({code})\n\n"
-                f"💰 현재가: "
-                f"{fmt_price(current_price)}\n"
-                f"🎯 TP2: "
-                f"{fmt_price(tp2)}\n"
-                f"🟢 진입가: "
-                f"{fmt_price(entry)}\n\n"
-                "포지션 추적 종료"
-            )
-
-            send_telegram(
-                message
-            )
-
-            remove_codes.append(
-                code
-            )
-
-            continue
-
-        # ================================================
-        # TP1
-        # ================================================
-
-        if (
-            current_price >= tp1
-            and not position.get(
-                "tp1_hit",
-                False
-            )
-        ):
-
-            position["tp1_hit"] = True
-
-            position["sl"] = entry
-
-            message = (
-                "🎯 [주식 TP1 도달]\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                f"📌 {name} ({code})\n\n"
-                f"💰 현재가: "
-                f"{fmt_price(current_price)}\n"
-                f"🎯 TP1: "
-                f"{fmt_price(tp1)}\n\n"
-                f"🛡️ SL 이동: "
-                f"{fmt_price(entry)}\n"
-                "\n"
-                "→ 손익분기점 보호 모드"
-            )
-
-            send_telegram(
-                message
-            )
-
-    for code in remove_codes:
-
-        if code in positions:
-            del positions[code]
-
-
-# ============================================================
-# RUN SCAN
-# ============================================================
-
-def run_scan(
-    state,
-    mode,
-    universe,
-    quotes
-):
-
-    candidates = scan_candidates(
-        universe,
-        quotes,
-        mode
-    )
-
-    print(
-        f"{mode.upper()} candidates: "
-        f"{len(candidates)}"
-    )
-
-    if not candidates:
-
-        message = (
-            f"🔎 [{mode_title(mode)}]\n\n"
-            "현재 조건을 만족하는 "
-            "후보 종목이 없습니다.\n\n"
-            "기술적 조건과 거래대금 기준을 "
-            "통과한 종목만 알림합니다."
-        )
-
-        send_telegram(
-            message
-        )
-
-        return
-
-    sent_count = 0
-
-    for candidate in candidates:
-
-        code = candidate["code"]
-
-        if signal_recent(
-            state,
-            code,
-            mode
-        ):
-
-            print(
-                f"[DUPLICATE] "
-                f"{candidate['name']} "
-                f"{code}"
-            )
-
-            continue
-
-        print(
-            "\n===================================="
-        )
-
-        print(
-            f"NEWS SEARCH: "
-            f"{candidate['name']} "
-            f"({code})"
-        )
-
-        news = get_recent_news(
-            candidate["name"],
-            code
-        )
-
-        print(
-            f"NEWS FOUND: "
-            f"{len(news)}"
-        )
-
-        message = build_candidate_message(
-            candidate,
-            mode,
-            news
-        )
-
-        if send_telegram(
-            message
-        ):
-
-            sent_count += 1
-
-            mark_signal(
-                state,
-                code,
-                mode
-            )
-
-            if mode == "close":
-
-                create_position(
-                    state,
-                    candidate,
-                    mode
-                )
-
-        time.sleep(1)
-
-    print(
-        f"개별 Telegram 알림: "
-        f"{sent_count}개"
-    )
 
 
 # ============================================================
@@ -1732,152 +674,100 @@ def run_scan(
 # ============================================================
 
 def main():
+    print("====================================")
+    print(" KOREA STOCK HUNTER V6.4")
+    print(f" KST: {now().isoformat()}")
+    print("====================================")
 
-    print(
-        "===================================="
-    )
+    mode=get_mode()
 
-    print(
-        " KOREA STOCK HUNTER V6.3"
-    )
+    print("MODE:",mode)
+    print("FORCE_SCAN:",FORCE or "-")
 
-    print(
-        f" KST: {now_kst().isoformat()}"
-    )
+    state=load_state()
+    state["last_run"]=now().isoformat()
 
-    print(
-        "===================================="
-    )
-
-    mode = get_mode()
-
-    print(
-        f"MODE: {mode}"
-    )
-
-    print(
-        f"FORCE_SCAN: {FORCE_SCAN_ENV or '-'}"
-    )
-
-    state = load_state()
-
-    state["last_run"] = (
-        now_kst().isoformat()
-    )
-
-    # ================================================
-    # UNIVERSE
-    # ================================================
-
-    universe = get_universe()
+    universe=get_universe()
 
     if universe.empty:
-
-        send_telegram(
-            "⚠️ [국장 자동화]\n\n"
+        telegram(
+            "⚠️ [국장 자동화]\n"
             "KRX 종목 목록을 가져오지 못했습니다."
         )
-
         save_state(state)
-
         return
 
-    codes = (
-        universe["Code"]
-        .astype(str)
-        .str.zfill(6)
-        .tolist()
-    )
+    codes=universe["Code"].astype(str).str.zfill(6).tolist()
+    quotes=realtime(codes)
 
-    # ================================================
-    # REALTIME
-    # ================================================
+    # 기존 포지션은 검색 실패와 관계없이 확인
+    monitor(state,quotes)
 
-    quotes = get_realtime_quotes(
-        codes
-    )
-
-    # ================================================
-    # 기존 포지션 모니터링
-    # ================================================
-
-    monitor_positions(
-        state,
-        quotes
-    )
-
-    # ================================================
-    # 실시간 데이터 부족
-    # ================================================
-
-    if len(quotes) < MIN_REALTIME_DATA:
-
-        warning = (
+    if len(quotes)<MIN_REALTIME:
+        telegram(
             "⚠️ [국장 자동화]\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "실시간 데이터 부족\n\n"
-            f"조회 성공: "
-            f"{len(quotes)}/"
-            f"{len(codes)}\n\n"
-            "후보 검색을 중단했습니다.\n"
-            "기존 포지션 TP/SL 추적만 수행했습니다."
+            f"실시간 데이터 부족\n"
+            f"조회 성공: {len(quotes)}/{len(codes)}\n\n"
+            "신규 후보 검색을 중단했습니다.\n"
+            "기존 포지션만 확인했습니다."
         )
-
-        send_telegram(
-            warning
-        )
-
         save_state(state)
-
         return
 
-    # ================================================
-    # SCAN
-    # ================================================
+    if mode not in {"morning","intraday","close"}:
+        print("스크리닝 시간이 아니므로 모니터링만 실행")
+        save_state(state)
+        return
 
-    if mode in {
-        "morning",
-        "intraday",
-        "close",
-    }:
+    candidates=scan(
+        state,
+        universe,
+        quotes,
+        mode
+    )
 
-        run_scan(
-            state,
-            mode,
-            universe,
-            quotes
+    print(f"{mode.upper()} candidates: {len(candidates)}")
+
+    if not candidates:
+        telegram(
+            f"🔎 [{mode_name(mode)}]\n\n"
+            "현재 조건을 만족하는 후보가 없습니다."
         )
+        save_state(state)
+        return
 
-    else:
+    sent=0
 
-        print(
-            "현재 시각은 스크리닝 시간이 아니므로 "
-            "포지션 모니터링만 실행합니다."
-        )
+    # 종목별 개별 Telegram
+    for c in candidates:
+        code=c["code"]
 
-    # ================================================
-    # SAVE
-    # ================================================
+        if recent_signal(state,code,mode):
+            print("[DUPLICATE]",c["name"],code)
+            continue
+
+        msg=message(c,mode)
+
+        if telegram(msg):
+            mark_signal(state,code,mode)
+            sent+=1
+
+            # 종가 후보만 추적
+            if mode=="close":
+                add_position(state,c,mode)
+
+        time.sleep(1)
+
+    print(f"개별 알림: {sent}개")
+    print(f"추적 포지션: {len(state['positions'])}개")
 
     save_state(state)
 
-    print(
-        "===================================="
-    )
-
-    print(
-        "RUN COMPLETE"
-    )
-
-    print(
-        f"추적 포지션: "
-        f"{len(state.get('positions', {}))}개"
-    )
-
-    print(
-        "===================================="
-    )
+    print("====================================")
+    print("RUN COMPLETE")
+    print("====================================")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
