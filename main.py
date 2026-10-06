@@ -1,6 +1,7 @@
 import os, json, requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import FinanceDataReader as fdr
 
@@ -26,7 +27,6 @@ def tg(text):
             },
             timeout=TIMEOUT
         )
-        print("[TELEGRAM]", r.status_code)
         return r.ok
     except Exception as e:
         print("[TELEGRAM ERR]", e)
@@ -59,11 +59,7 @@ def run_mode():
     return "monitor"
 
 def universe_and_quotes():
-    """
-    FinanceDataReader를 이용해 KRX 전 종목 마스터를 안정적으로 수집합니다.
-    """
     out_items = []
-
     try:
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty:
@@ -77,72 +73,68 @@ def universe_and_quotes():
 
             if not code or not name:
                 continue
-            
             if "KOSPI" not in market and "KOSDAQ" not in market:
                 continue
 
-            out_items.append({
-                "code": code,
-                "name": name
-            })
-
+            out_items.append({"code": code, "name": name})
         print(f"[UNIVERSE] Total Target Items: {len(out_items)}")
-
     except Exception as e:
         print("[UNIVERSE ERR]", e)
-
     return out_items
 
+def fetch_single_quote(item, start_str, end_str):
+    code = item["code"]
+    try:
+        df = fdr.DataReader(code, start_str, end_str)
+        if df.empty:
+            return None
+        
+        latest = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) >= 2 else latest
+
+        price = float(latest["Close"])
+        prev_close = float(prev["Close"])
+        change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+        
+        volume = float(latest["Volume"])
+        open_p = float(latest["Open"])
+        high_p = float(latest["High"])
+        low_p = float(latest["Low"])
+        turnover = price * volume
+
+        if price <= 0:
+            return None
+
+        return code, {
+            "price": price,
+            "change": change,
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "volume": volume,
+            "turnover": turnover
+        }
+    except:
+        return None
+
 def get_market_quotes(items):
-    """
-    각 종목별 실시간/당일 지표를 FinanceDataReader로 안전하게 가져옵니다.
-    """
     out_quotes = {}
     end_str = datetime.now(KST).strftime("%Y-%m-%d")
     start_str = (datetime.now(KST) - timedelta(days=7)).strftime("%Y-%m-%d")
 
-    for item in items:
-        code = item["code"]
-        try:
-            df = fdr.DataReader(code, start_str, end_str)
-            if df.empty:
-                continue
-            
-            latest = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) >= 2 else latest
-
-            price = float(latest["Close"])
-            prev_close = float(prev["Close"])
-            change = ((price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
-            
-            volume = float(latest["Volume"])
-            open_p = float(latest["Open"])
-            high_p = float(latest["High"])
-            low_p = float(latest["Low"])
-            turnover = price * volume
-
-            if price <= 0:
-                continue
-
-            out_quotes[code] = {
-                "price": price,
-                "change": change,
-                "open": open_p,
-                "high": high_p,
-                "low": low_p,
-                "volume": volume,
-                "turnover": turnover
-            }
-        except Exception:
-            continue
+    print("[QUOTE] Fetching market quotes with multithreading...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(fetch_single_quote, item, start_str, end_str) for item in items]
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                code, q_data = res
+                out_quotes[code] = q_data
 
     print(f"[QUOTE] Total Loaded Quotes: {len(out_quotes)}")
     return out_quotes
 
 def history(code):
-    """
-    최근 일봉 데이터를 오름차순으로 가져옵니다.
-    """
     try:
         end_str = datetime.now(KST).strftime("%Y-%m-%d")
         start_str = (datetime.now(KST) - timedelta(days=220)).strftime("%Y-%m-%d")
@@ -181,11 +173,8 @@ def history(code):
                 "low": row["low"],
                 "volume": row["volume"]
             })
-
         return bars
-
-    except Exception as e:
-        print("[HIST ERR]", code, e)
+    except:
         return []
 
 def avg(a):
@@ -199,7 +188,6 @@ def analyze(q, bars, md):
     vols = [x["volume"] for x in bars]
 
     p = q["price"]
-
     ma5 = avg(closes[-5:])
     ma20 = avg(closes[-20:])
     ma60 = avg(closes[-60:]) if len(closes) >= 60 else avg(closes)
@@ -209,67 +197,32 @@ def analyze(q, bars, md):
 
     hi = max(closes[-20:])
     lo = min(closes[-20:])
-
     pos = (p - lo) / (hi - lo) if hi > lo else .5
 
     score = 0
     why = []
 
-    checks = [
-        (p > ma20, 2, "20일선 위"),
-        (ma5 > ma20, 2, "단기 정배열"),
-        (p > ma60, 1, "60일선 위")
-    ]
+    if p > ma20: score += 2; why.append("20일선 위")
+    if ma5 > ma20: score += 2; why.append("단기 정배열")
+    if p > ma60: score += 1; why.append("60일선 위")
 
-    for ok, pts, msg in checks:
-        if ok:
-            score += pts
-            why.append(msg)
+    if vr >= 3: score += 3; why.append(f"거래량 {vr:.1f}배")
+    elif vr >= 2: score += 2; why.append(f"거래량 {vr:.1f}배")
+    elif vr >= 1.3: score += 1; why.append(f"거래량 {vr:.1f}배")
 
-    if vr >= 3:
-        score += 3
-        why.append(f"거래량 {vr:.1f}배")
-    elif vr >= 2:
-        score += 2
-        why.append(f"거래량 {vr:.1f}배")
-    elif vr >= 1.3:
-        score += 1
-        why.append(f"거래량 {vr:.1f}배")
+    if q["change"] >= 7: score += 2; why.append(f"상승률 +{q['change']:.1f}%")
+    elif q["change"] >= 3: score += 1; why.append(f"상승률 +{q['change']:.1f}%")
 
-    if q["change"] >= 7:
-        score += 2
-        why.append(f"상승률 +{q['change']:.1f}%")
-    elif q["change"] >= 3:
-        score += 1
-        why.append(f"상승률 +{q['change']:.1f}%")
+    if pos >= .8: score += 2; why.append("20일 고점권")
+    elif pos >= .65: score += 1; why.append("상단 가격대")
 
-    if pos >= .8:
-        score += 2
-        why.append("20일 고점권")
-    elif pos >= .65:
-        score += 1
-        why.append("상단 가격대")
+    if p >= hi: score += 3; why.append("20일 신고가")
+    elif p >= hi * .98: score += 1; why.append("20일 고점 근접")
 
-    if p >= hi:
-        score += 3
-        why.append("20일 신고가")
-    elif p >= hi * .98:
-        score += 1
-        why.append("20일 고점 근접")
+    if q["turnover"] >= 50e8: score += 2; why.append("거래대금 50억+")
+    elif q["turnover"] >= 10e8: score += 1; why.append("거래대금 10억+")
 
-    if q["turnover"] >= 50e8:
-        score += 2
-        why.append("거래대금 50억+")
-    elif q["turnover"] >= 10e8:
-        score += 1
-        why.append("거래대금 10억+")
-
-    need = {
-        "morning": 7,
-        "intraday": 8,
-        "close": 9
-    }.get(md, 8)
-
+    need = {"morning": 7, "intraday": 8, "close": 9}.get(md, 8)
     if score < need:
         return None
 
@@ -278,31 +231,15 @@ def analyze(q, bars, md):
 def news(name):
     try:
         u = "https://news.google.com/rss/search"
-        r = S.get(
-            u,
-            params={
-                "q": f'"{name}" 주식',
-                "hl": "ko",
-                "gl": "KR",
-                "ceid": "KR:ko"
-            },
-            timeout=5
-        )
-
-        if r.status_code != 200:
-            return []
-
+        r = S.get(u, params={"q": f'"{name}" 주식', "hl": "ko", "gl": "KR", "ceid": "KR:ko"}, timeout=5)
+        if r.status_code != 200: return []
         import re
-        return [
-            re.sub(r"<.*?>", "", x).strip()
-            for x in re.findall(r"<item>.*?<title>(.*?)</title>.*?</item>", r.text, re.S | re.I)[:2]
-        ]
+        return [re.sub(r"<.*?>", "", x).strip() for x in re.findall(r"<item>.*?<title>(.*?)</title>.*?</item>", r.text, re.S | re.I)[:2]]
     except:
         return []
 
 def build(item, q, a, md):
     score, why, vr = a
-
     p = q["price"]
     sl = p * .95
     tp1 = p * 1.03
@@ -331,33 +268,17 @@ def build(item, q, a, md):
         lines += ["", "📰 최근 뉴스"]
         lines += [f"• {x}" for x in ns]
 
-    # PC 및 모바일 사용자 모두를 위한 링크 제공
     pc_url = f"https://finance.naver.com/item/main.naver?code={item['code']}"
     m_url = f"https://m.stock.naver.com/domestic/stock/{item['code']}/total"
+    lines += ["", f"🔗 PC: {pc_url}", f"📱 모바일: {m_url}"]
 
-    lines += [
-        "",
-        f"🔗 PC: {pc_url}",
-        f"📱 모바일: {m_url}"
-    ]
-
-    position = {
-        "name": item["name"],
-        "entry": p,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp1_hit": False
-    }
-
+    position = {"name": item["name"], "entry": p, "sl": sl, "tp1": tp1, "tp2": tp2, "tp1_hit": False}
     return "\n".join(lines), position
 
 def monitor(st, qs):
     for code, pos in list(st["positions"].items()):
         q = qs.get(code)
-        if not q:
-            continue
-
+        if not q: continue
         p = q["price"]
         sl = float(pos.get("sl", 0))
         entry = float(pos.get("entry", 0))
@@ -365,53 +286,28 @@ def monitor(st, qs):
         tp2 = float(pos.get("tp2", 0))
 
         if p <= sl:
-            tg(
-                f"🛑 [손절 도달]\n"
-                f"{pos.get('name', code)}\n"
-                f"현재가: {p:,.0f}원\n"
-                f"SL: {sl:,.0f}원"
-            )
+            tg(f"🛑 [손절 도달]\n{pos.get('name', code)}\n현재가: {p:,.0f}원\nSL: {sl:,.0f}원")
             del st["positions"][code]
-
         elif not pos.get("tp1_hit") and p >= tp1:
-            tg(
-                f"🎯 [TP1 도달]\n"
-                f"{pos.get('name', code)}\n"
-                f"현재가: {p:,.0f}원\n"
-                f"TP1: {tp1:,.0f}원\n"
-                f"🔒 SL → 진입가"
-            )
+            tg(f"🎯 [TP1 도달]\n{pos.get('name', code)}\n현재가: {p:,.0f}원\nTP1: {tp1:,.0f}원\n🔒 SL → 진입가")
             pos["tp1_hit"] = True
             pos["sl"] = entry
-
         elif p >= tp2:
-            tg(
-                f"🏁 [TP2 도달]\n"
-                f"{pos.get('name', code)}\n"
-                f"현재가: {p:,.0f}원\n"
-                f"TP2: {tp2:,.0f}원\n"
-                f"추적 종료"
-            )
+            tg(f"🏁 [TP2 도달]\n{pos.get('name', code)}\n현재가: {p:,.0f}원\nTP2: {tp2:,.0f}원\n추적 종료")
             del st["positions"][code]
 
 def main():
     md = run_mode()
-
     print("====================================")
-    print(" KOREA STOCK HUNTER V11.1 (FDR)")
+    print(" KOREA STOCK HUNTER V11.2 (Optimized)")
     print("====================================")
     print("MODE:", md, "FORCE:", FORCE)
-    print("TOKEN:", bool(TOKEN), "CHAT_ID:", bool(CHAT_ID))
 
     st = load_state()
     items = universe_and_quotes()
 
     if not items:
-        tg(
-            "⚠️ [국장 자동화]\n"
-            "종목 마스터 수집 실패\n"
-            "이번 스캔을 중단했습니다."
-        )
+        tg("⚠️ [국장 자동화]\n종목 마스터 수집 실패")
         return
 
     qs = get_market_quotes(items)
@@ -422,49 +318,25 @@ def main():
         return
 
     if len(qs) < 10:
-        tg(
-            f"⚠️ [국장 자동화]\n"
-            f"실시간 데이터 부족\n"
-            f"조회 성공: {len(qs)}/{len(items)}\n"
-            f"이번 스캔을 중단했습니다."
-        )
+        tg(f"⚠️ [국장 자동화]\n실시간 데이터 부족\n조회 성공: {len(qs)}/{len(items)}")
         return
 
     pool = []
     for item in items:
         q = qs.get(item["code"])
-        if not q:
-            continue
-
+        if not q: continue
         if q["turnover"] >= 3e8 or q["change"] >= 1.5:
             pool.append(item)
 
-    pool.sort(
-        key=lambda x: (
-            qs[x["code"]]["turnover"],
-            qs[x["code"]]["change"]
-        ),
-        reverse=True
-    )
-
+    pool.sort(key=lambda x: (qs[x["code"]]["turnover"], qs[x["code"]]["change"]), reverse=True)
     pool = pool[:70]
     print("[SCAN] prefilter:", len(pool))
 
     found = []
     for item in pool:
-        a = analyze(
-            qs[item["code"]],
-            history(item["code"]),
-            md
-        )
-
+        a = analyze(qs[item["code"]], history(item["code"]), md)
         if a:
-            found.append((
-                a[0],
-                item,
-                qs[item["code"]],
-                a
-            ))
+            found.append((a[0], item, qs[item["code"]], a))
 
     found.sort(key=lambda x: x[0], reverse=True)
     print("[SCAN] final:", len(found))
@@ -472,7 +344,6 @@ def main():
     for _, item, q, a in found[:3]:
         key = f"{md}:{item['code']}"
         last = st["sent"].get(key)
-
         if last:
             try:
                 if datetime.now(KST) - datetime.fromisoformat(last) < timedelta(hours=4):
@@ -481,7 +352,6 @@ def main():
                 pass
 
         msg, pos = build(item, q, a, md)
-
         if tg(msg):
             st["sent"][key] = datetime.now(KST).isoformat()
             if md == "close":
