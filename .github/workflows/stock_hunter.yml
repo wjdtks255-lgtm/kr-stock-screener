@@ -2,11 +2,11 @@ name: Korea Stock Hunter
 
 concurrency:
   group: korea-stock-hunter
-  cancel-in-progress: false # 기존 작업이 끝날 때까지 대기시켜 데이터 파일(json) 충돌을 방지합니다.
+  cancel-in-progress: true # 멈춰 있는 이전 작업이 있으면 자동 취소하고 새 작업 실행
 
 on:
   schedule:
-    - cron: '*/15 * * * 1-5' # 평일 15분 간격 실행 (너무 잦은 실행으로 인한 대기열 폭증 방지)
+    - cron: '*/15 * * * 1-5' # 평일 15분 간격 실행
   workflow_dispatch:
     inputs:
       MODE:
@@ -23,6 +23,7 @@ on:
 jobs:
   run-hunter:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # 10분이 지나도 끝나지 않으면 강제 종료하여 무한 대기 방지
     permissions:
       contents: write
 
