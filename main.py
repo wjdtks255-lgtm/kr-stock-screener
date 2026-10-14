@@ -63,22 +63,26 @@ def save_state(s):
 
 
 def run_mode():
-    # 외부 환경변수(MODE)가 명시되어 있다면 최우선 적용
+    # 1. 환경 변수(MODE)가 명시되어 있는 경우 최우선 적용
     if MODE in ("morning", "intraday", "close", "monitor"):
         return MODE
 
+    # 2. 강제 스캔 설정이 켜져있을 경우
     if FORCE in ("1", "true", "yes", "on"):
         return "intraday"
 
-    m = datetime.now(KST).hour * 60 + datetime.now(KST).minute
+    # 3. KST 시간 기준 자동 모드 분기
+    now_kst = datetime.now(KST)
+    m = now_kst.hour * 60 + now_kst.minute
+    print(f"[TIME CHECK] Current KST Time: {now_kst.strftime('%H:%M')} (Minutes: {m})")
 
-    # 시간대별 정밀 모드 분기 (KST 기준)
-    if 540 <= m <= 570:      # 09:00 ~ 09:30 (개장 초기)
+    if 540 <= m <= 570:      # 09:00 ~ 09:30 (개장 초기 탐색)
         return "morning"
-    elif 571 <= m <= 910:    # 09:31 ~ 15:10 (장중 실시간)
+    elif 571 <= m <= 910:    # 09:31 ~ 15:10 (장중 실시간 탐색)
         return "intraday"
-    elif 911 <= m <= 930:    # 15:11 ~ 15:30 (장 마감 전 종가 탐색)
+    elif 911 <= m <= 930:    # 15:11 ~ 15:30 (종가 탐색)
         return "close"
+    
     return "monitor"
 
 
@@ -250,25 +254,20 @@ def analyze(q, bars, md):
     score = 0
     why = []
 
-    # 모드별 맞춤형 스코어링 가중치 조정
     if md == "morning":
-        # 개장 초기: 거래량 급증 및 시가 고가 돌파 주목
-        if q["change"] >= 3: score += 2; why.append(f"초반 급등 +{q['change']:.1f}%")
-        if vr >= 2.0: score += 3; why.append(f"초반 거래량 {vr:.1f}배")
-        if p >= ma20: score += 2; why.append("20일선 위 출발")
+        if q["change"] >= 2.5: score += 2; why.append(f"초반 급등 +{q['change']:.1f}%")
+        if vr >= 1.8: score += 3; why.append(f"거래량 {vr:.1f}배 급증")
+        if p >= ma20: score += 2; why.append("20일선 위 안착")
     elif md == "close":
-        # 종가 탐색: 탄탄한 지지 및 고가권 마감 임박 종목
         if p >= hi * 0.97: score += 3; why.append("고가권 종가 마감 임박")
-        if q["change"] >= 2: score += 2; why.append(f"상승 마감 +{q['change']:.1f}%")
-        if vr >= 1.5: score += 2; why.append(f"종가 거래량 {vr:.1f}배")
+        if q["change"] >= 1.5: score += 2; why.append(f"상승 마감 +{q['change']:.1f}%")
+        if vr >= 1.3: score += 2; why.append(f"종가 거래량 {vr:.1f}배")
     else:
-        # 인트라데이 (장중 실시간)
         if p > ma20: score += 2; why.append("20일선 위")
         if ma5 > ma20: score += 2; why.append("단기 정배열")
-        if vr >= 2.0: score += 2; why.append(f"거래량 {vr:.1f}배")
-        if q["change"] >= 4: score += 2; why.append(f"상승률 +{q['change']:.1f}%")
+        if vr >= 1.8: score += 2; why.append(f"거래량 {vr:.1f}배")
+        if q["change"] >= 3: score += 2; why.append(f"상승률 +{q['change']:.1f}%")
 
-    # 기본 기술적 점수 추가
     if p >= hi * 0.98:
         score += 2
         why.append("20일 신고가 근접")
@@ -276,7 +275,6 @@ def analyze(q, bars, md):
         score += 2
         why.append("거래대금 30억+")
 
-    # 모드별 최소 커트라인 점수 완화 (탐색 확률 높임)
     need_score = {"morning": 5, "intraday": 6, "close": 5}.get(md, 5)
     if score < need_score:
         return None
@@ -314,11 +312,15 @@ def news(name):
 def build(item, q, a, md):
     score, why, vr = a
     p = q["price"]
-    sl = p * 0.96   # 손절가 4%
-    tp1 = p * 1.03  # 익절 1차 3%
-    tp2 = p * 1.06  # 익절 2차 6%
+    sl = p * 0.96   # 손절가 -4%
+    tp1 = p * 1.03  # 익절 1차 +3%
+    tp2 = p * 1.06  # 익절 2차 +6%
 
-    mode_label = {"morning": "개장 초기 급등 포착", "intraday": "장중 실시간 포착", "close": "장 마감 종가 공략"}.get(md, md.upper())
+    mode_label = {
+        "morning": "개장 초기 급등 탐색",
+        "intraday": "장중 실시간 탐색",
+        "close": "장 마감 종가 공략"
+    }.get(md, md.upper())
 
     lines = [
         f"🚨 <b>[{mode_label}]</b>",
@@ -382,7 +384,7 @@ def monitor(st, qs):
 def main():
     md = run_mode()
     print("====================================")
-    print(" KOREA STOCK HUNTER V11.4 (Optimized)")
+    print(" KOREA STOCK HUNTER V11.5 (Final)")
     print("====================================")
     print(f"MODE: {md} | KST Time: {datetime.now(KST).strftime('%H:%M')}")
 
@@ -409,7 +411,6 @@ def main():
         q = qs.get(item["code"])
         if not q:
             continue
-        # 탐색 대상 풀 조건 완화 (거래대금 1억 이상 또는 상승세 종목 모두 포착)
         if q["turnover"] >= 1e8 or q["change"] >= 1.0:
             pool.append(item)
 
@@ -430,12 +431,10 @@ def main():
     print("[SCAN] qualified candidates:", len(found))
 
     for _, item, q, a in found[:3]:
-        # 모드별 독립 키 적용하여 시간대별(아침/장중/종가) 재탐색 가능하도록 개선
         key = f"{md}:{item['code']}"
         last = st["sent"].get(key)
         if last:
             try:
-                # 동일 모드 내에서는 2시간 동안 중복 발송 방지
                 if (
                     datetime.now(KST) - datetime.fromisoformat(last)
                     < timedelta(hours=2)
