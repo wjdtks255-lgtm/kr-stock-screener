@@ -10,13 +10,14 @@ import requests
 
 TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
-MODE = os.getenv("MODE", "").strip().lower()
-FORCE = os.getenv("FORCE_SCAN", "").strip().lower()
 
 STATE_FILE = "active_positions.json"
 KST = ZoneInfo("Asia/Seoul")
 TIMEOUT = 10
 S = requests.Session()
+
+MAX_SLOTS = 8       # 최대 보유 슬롯 8개 제한
+COOLDOWN_HOURS = 4  # 동일 종목 재발송 쿨다운 (시간)
 
 
 def tg(text):
@@ -60,30 +61,6 @@ def save_state(s):
         os.replace(STATE_FILE + ".tmp", STATE_FILE)
     except Exception as e:
         print("[STATE SAVE ERR]", e)
-
-
-def run_mode():
-    # 1. 환경 변수(MODE)가 명시되어 있는 경우 최우선 적용
-    if MODE in ("morning", "intraday", "close", "monitor"):
-        return MODE
-
-    # 2. 강제 스캔 설정이 켜져있을 경우
-    if FORCE in ("1", "true", "yes", "on"):
-        return "intraday"
-
-    # 3. KST 시간 기준 자동 모드 분기
-    now_kst = datetime.now(KST)
-    m = now_kst.hour * 60 + now_kst.minute
-    print(f"[TIME CHECK] Current KST Time: {now_kst.strftime('%H:%M')} (Minutes: {m})")
-
-    if 540 <= m <= 570:      # 09:00 ~ 09:30 (개장 초기 탐색)
-        return "morning"
-    elif 571 <= m <= 910:    # 09:31 ~ 15:10 (장중 실시간 탐색)
-        return "intraday"
-    elif 911 <= m <= 930:    # 15:11 ~ 15:30 (종가 탐색)
-        return "close"
-    
-    return "monitor"
 
 
 def universe_and_quotes():
@@ -232,7 +209,7 @@ def avg(a):
     return sum(a) / len(a) if a else 0
 
 
-def analyze(q, bars, md):
+def analyze(q, bars):
     if len(bars) < 30:
         return None
 
@@ -242,41 +219,51 @@ def analyze(q, bars, md):
     p = q["price"]
     ma5 = avg(closes[-5:])
     ma20 = avg(closes[-20:])
-    ma60 = avg(closes[-60:]) if len(closes) >= 60 else avg(closes)
 
     avgv = avg(vols[-20:])
     vr = q["volume"] / avgv if avgv else 0
 
     hi = max(closes[-20:])
-    lo = min(closes[-20:])
-    pos = (p - lo) / (hi - lo) if hi > lo else 0.5
 
     score = 0
     why = []
 
-    if md == "morning":
-        if q["change"] >= 2.5: score += 2; why.append(f"초반 급등 +{q['change']:.1f}%")
-        if vr >= 1.8: score += 3; why.append(f"거래량 {vr:.1f}배 급증")
-        if p >= ma20: score += 2; why.append("20일선 위 안착")
-    elif md == "close":
-        if p >= hi * 0.97: score += 3; why.append("고가권 종가 마감 임박")
-        if q["change"] >= 1.5: score += 2; why.append(f"상승 마감 +{q['change']:.1f}%")
-        if vr >= 1.3: score += 2; why.append(f"종가 거래량 {vr:.1f}배")
-    else:
-        if p > ma20: score += 2; why.append("20일선 위")
-        if ma5 > ma20: score += 2; why.append("단기 정배열")
-        if vr >= 1.8: score += 2; why.append(f"거래량 {vr:.1f}배")
-        if q["change"] >= 3: score += 2; why.append(f"상승률 +{q['change']:.1f}%")
-
-    if p >= hi * 0.98:
+    # [고확신 상승 종목 엄격 필터링 로직]
+    if p > ma20:
         score += 2
-        why.append("20일 신고가 근접")
-    if q["turnover"] >= 30e8:
+        why.append("20일선 위 안착")
+    if ma5 > ma20:
         score += 2
-        why.append("거래대금 30억+")
+        why.append("단기 이동평균선 정배열")
+    
+    # 거래량 급증 조건
+    if vr >= 2.5:
+        score += 3
+        why.append(f"평균 거래량 {vr:.1f}배 폭증")
+    elif vr >= 1.8:
+        score += 2
+        why.append(f"평균 거래량 {vr:.1f}배 급증")
 
-    need_score = {"morning": 5, "intraday": 6, "close": 5}.get(md, 5)
-    if score < need_score:
+    # 강한 상승률 조건
+    if q["change"] >= 5.0:
+        score += 3
+        why.append(f"급등세 (+{q['change']:.1f}%)")
+    elif q["change"] >= 3.0:
+        score += 2
+        why.append(f"상승세 (+{q['change']:.1f}%)")
+
+    # 20일 신고가 경신 혹은 임박
+    if p >= hi * 0.99:
+        score += 3
+        why.append("20일 신고가 돌파/임박")
+
+    # 풍부한 거래대금 (50억 원 이상)
+    if q["turnover"] >= 50e8:
+        score += 2
+        why.append("거래대금 50억 원 이상 유입")
+
+    # 고확신 종목만 통과시키기 위한 기준 점수 (12점 이상)
+    if score < 12:
         return None
 
     return score, why, vr
@@ -309,26 +296,21 @@ def news(name):
         return []
 
 
-def build(item, q, a, md):
+def build(item, q, a):
     score, why, vr = a
     p = q["price"]
     sl = p * 0.96   # 손절가 -4%
-    tp1 = p * 1.03  # 익절 1차 +3%
-    tp2 = p * 1.06  # 익절 2차 +6%
-
-    mode_label = {
-        "morning": "개장 초기 급등 탐색",
-        "intraday": "장중 실시간 탐색",
-        "close": "장 마감 종가 공략"
-    }.get(md, md.upper())
+    tp1 = p * 1.03  # 1차 익절 +3%
+    tp2 = p * 1.06  # 2차 익절 +6%
+    tp3 = p * 1.10  # 3차 최종 익절 +10%
 
     lines = [
-        f"🚨 <b>[{mode_label}]</b>",
+        "🔥 <b>[고확신 주도주 퀀트 시그널]</b>",
         "━━━━━━━━━━━━━━━━━━",
         f"📌 <b>{item['name']}</b> (<code>{item['code']}</code>)",
         f"💰 현재가: <b>{p:,.0f}원</b> ({q['change']:+.2f}%)",
         f"💵 거래대금: {q['turnover']/1e8:,.0f}억원 | 🔥 거래량: {vr:.2f}배",
-        f"⭐ 탐지 점수: <b>{score}점</b>",
+        f"⭐ 확신 점수: <b>{score}점</b>",
         "",
         f"📊 <b>상승 근거</b>: {' · '.join(why[:4])}",
         "",
@@ -336,6 +318,7 @@ def build(item, q, a, md):
         f"🛡 손절가(SL): <code>{sl:,.0f}원</code> (-4%)",
         f"🎯 TP1: <code>{tp1:,.0f}원</code> (+3%)",
         f"🎯 TP2: <code>{tp2:,.0f}원</code> (+6%)",
+        f"🎯 TP3 (최종): <code>{tp3:,.0f}원</code> (+10%)",
     ]
 
     ns = news(item["name"])
@@ -349,16 +332,20 @@ def build(item, q, a, md):
 
     position = {
         "name": item["name"],
+        "code": item["code"],
         "entry": p,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
+        "tp3": tp3,
         "tp1_hit": False,
+        "tp2_hit": False,
     }
     return "\n".join(lines), position
 
 
 def monitor(st, qs):
+    # 보유 중인 포지션 감시 (SL 혹은 최종 TP3 도달 시 시그널 종료 및 슬롯 반환)
     for code, pos in list(st["positions"].items()):
         q = qs.get(code)
         if not q:
@@ -368,50 +355,72 @@ def monitor(st, qs):
         entry = float(pos.get("entry", 0))
         tp1 = float(pos.get("tp1", 0))
         tp2 = float(pos.get("tp2", 0))
+        tp3 = float(pos.get("tp3", 0))
 
+        # 1. 손절가 이탈 시 (시그널 종료 및 슬롯 비우기)
         if p <= sl:
-            tg(f"🛑 <b>[손절 도달]</b>\n{pos.get('name', code)}\n현재가: {p:,.0f}원\nSL: {sl:,.0f}원 이탈")
+            tg(f"🛑 <b>[손절 도달 · 시그널 종료]</b>\n📌 {pos.get('name', code)}\n현재가: {p:,.0f}원\nSL: {sl:,.0f}원 이탈\n❌ 포지션 종료 및 슬롯 반환")
             del st["positions"][code]
+
+        # 2. TP3 최종 목표가 도달 시 (+10% 달성 시그널 종료 및 슬롯 비우기)
+        elif p >= tp3:
+            tg(f"🏆 <b>[TP3 최종 목표가 도달 · 시그널 마감]</b>\n📌 {pos.get('name', code)}\n현재가: {p:,.0f}원 (+10% 달성)\n🎉 최고 수익 달성 완료 및 슬롯 반환")
+            del st["positions"][code]
+
+        # 3. TP2 도달 시 (+6% 달성, 손절가를 TP1 가격으로 상향 조정)
+        elif not pos.get("tp2_hit") and p >= tp2:
+            tg(f"🎯 <b>[TP2 2차 목표가 도달]</b>\n📌 {pos.get('name', code)}\n현재가: {p:,.0f}원 (+6%)\n🔒 손절가를 TP1 가격({tp1:,.0f}원)으로 상향 조정 (트레일링 스탑)")
+            pos["tp2_hit"] = True
+            pos["sl"] = tp1
+
+        # 4. TP1 도달 시 (+3% 달성, 손절가를 진입가로 상향 조정)
         elif not pos.get("tp1_hit") and p >= tp1:
-            tg(f"🎯 <b>[TP1 1차 목표가 도달]</b>\n{pos.get('name', code)}\n현재가: {p:,.0f}원\n🔒 손절가를 진입가로 상향 조정 (본전 방어)")
+            tg(f"🎯 <b>[TP1 1차 목표가 도달]</b>\n📌 {pos.get('name', code)}\n현재가: {p:,.0f}원 (+3%)\n🔒 손절가를 진입가({entry:,.0f}원)로 상향 조정 (본전 방어 모드)")
             pos["tp1_hit"] = True
             pos["sl"] = entry
-        elif p >= tp2:
-            tg(f"🏁 <b>[TP2 최종 목표가 도달]</b>\n{pos.get('name', code)}\n현재가: {p:,.0f}원\n🎉 수익 실현 완료 및 추적 종료")
-            del st["positions"][code]
 
 
 def main():
-    md = run_mode()
     print("====================================")
-    print(" KOREA STOCK HUNTER V11.5 (Final)")
+    print(f" KOREA STOCK HUNTER V13.1 (Max Slots: {MAX_SLOTS} | TP1~TP3)")
     print("====================================")
-    print(f"MODE: {md} | KST Time: {datetime.now(KST).strftime('%H:%M')}")
+    print(f"KST Time: {datetime.now(KST).strftime('%H:%M')}")
 
     st = load_state()
+    
+    # 1. 전체 시장 시세 조회
     items = universe_and_quotes()
-
     if not items:
         tg("⚠️ <b>[국장 자동화 오류]</b>\n종목 마스터 수집 실패")
         return
 
     qs = get_market_quotes(items)
 
-    if md == "monitor":
-        monitor(st, qs)
-        save_state(st)
+    # 2. 기존 포지션 모니터링 (손절/최종 TP3 도달 시 슬롯 반환)
+    monitor(st, qs)
+    save_state(st)
+
+    # 3. 현재 활성화된 슬롯 확인
+    current_slots = len(st["positions"])
+    available_slots = MAX_SLOTS - current_slots
+    print(f"[SLOT STATUS] Active: {current_slots}/{MAX_SLOTS} | Available Slots: {available_slots}")
+
+    # 슬롯이 꽉 찼다면 새로운 스캔 없이 종료
+    if available_slots <= 0:
+        print("[SLOT FULL] All 8 slots are full. Skipping new scans until a slot frees up.")
         return
 
     if len(qs) < 10:
         tg(f"⚠️ <b>[국장 자동화 경고]</b>\n실시간 데이터 부족 (조회 성공: {len(qs)}/{len(items)})")
         return
 
+    # 4. 빈 슬롯만큼 고확신 상승 종목 스캔
     pool = []
     for item in items:
         q = qs.get(item["code"])
         if not q:
             continue
-        if q["turnover"] >= 1e8 or q["change"] >= 1.0:
+        if q["turnover"] >= 3e8 or q["change"] >= 2.0:
             pool.append(item)
 
     pool.sort(
@@ -423,33 +432,43 @@ def main():
 
     found = []
     for item in pool:
-        a = analyze(qs[item["code"]], history(item["code"]), md)
+        if item["code"] in st["positions"]:
+            continue
+        
+        a = analyze(qs[item["code"]], history(item["code"]))
         if a:
             found.append((a[0], item, qs[item["code"]], a))
 
     found.sort(key=lambda x: x[0], reverse=True)
     print("[SCAN] qualified candidates:", len(found))
 
-    for _, item, q, a in found[:3]:
-        key = f"{md}:{item['code']}"
+    # 빈 슬롯 수만큼 상위 종목 시그널 발송
+    sent_count = 0
+    for _, item, q, a in found:
+        if sent_count >= available_slots:
+            break
+
+        key = f"signal:{item['code']}"
         last = st["sent"].get(key)
         if last:
             try:
                 if (
                     datetime.now(KST) - datetime.fromisoformat(last)
-                    < timedelta(hours=2)
+                    < timedelta(hours=COOLDOWN_HOURS)
                 ):
                     continue
             except:
                 pass
 
-        msg, pos = build(item, q, a, md)
+        msg, pos = build(item, q, a)
         if tg(msg):
             st["sent"][key] = datetime.now(KST).isoformat()
             st["positions"][item["code"]] = pos
+            sent_count += 1
+            print(f"[SIGNAL SENT] {item['name']} ({item['code']}) | Slot filled.")
 
     save_state(st)
-    print("[DONE] Scan & Monitoring cycle completed successfully.")
+    print(f"[DONE] Cycle completed. Newly sent: {sent_count} | Active slots now: {len(st['positions'])}")
 
 
 if __name__ == "__main__":
