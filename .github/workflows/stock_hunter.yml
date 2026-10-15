@@ -1,27 +1,16 @@
-name: Korea Stock Hunter
+name: BTCC Signal Bot
 
 concurrency:
-  group: korea-stock-hunter
+  group: btcc-signal-bot
   cancel-in-progress: true
 
 on:
   schedule:
-    - cron: '*/15 * * * 1-5'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
-    inputs:
-      MODE:
-        description: '실행 모드 (morning, intraday, close, monitor 중 선택)'
-        required: true
-        default: 'monitor'
-        type: string
-      FORCE_SCAN:
-        description: '강제 실행 여부'
-        required: true
-        default: true
-        type: boolean
 
 jobs:
-  run-hunter:
+  run-btcc-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -40,27 +29,21 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      - name: Run Stock Hunter
+      - name: Run BTCC Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MODE: ${{ github.event.inputs.MODE || 'monitor' }}
-          FORCE_SCAN: ${{ github.event.inputs.FORCE_SCAN || 'true' }}
         run: |
           python main.py
-
-      - name: Pull latest changes before commit
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull origin main --rebase || echo "No rebase needed"
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: active_positions.json
-          commit_message: "Update Korea Stock Hunter state [skip ci]"
+          commit_message: "Update BTCC Bot active positions [skip ci]"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
