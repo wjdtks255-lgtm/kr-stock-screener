@@ -6,7 +6,7 @@ concurrency:
 
 on:
   schedule:
-    - cron: '0 0-7 * * 1-5'  # 월~금 한국 장중 시간 실행
+    - cron: '0 0-7 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - name: Run Stock Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
           python main.py
 
