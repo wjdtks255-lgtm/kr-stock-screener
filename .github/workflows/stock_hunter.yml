@@ -1,16 +1,16 @@
-name: BTCC Signal Bot
+name: Korea Stock Hunter Screener
 
 concurrency:
-  group: btcc-signal-bot
+  group: kr-stock-screener
   cancel-in-progress: true
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 0-7 * * 1-5'  # 월~금 한국 장중 시간 실행
   workflow_dispatch:
 
 jobs:
-  run-btcc-bot:
+  run-stock-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -33,10 +33,10 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      - name: Run BTCC Bot
+      - name: Run Stock Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python main.py
 
@@ -44,6 +44,6 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: active_positions.json
-          commit_message: "Update BTCC Bot active positions [skip ci]"
+          commit_message: "Update Korea Stock Hunter state [skip ci]"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
