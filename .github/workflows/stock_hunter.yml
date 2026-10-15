@@ -6,7 +6,7 @@ concurrency:
 
 on:
   schedule:
-    - cron: '0 0-7 * * 1-5'
+    - cron: '*/15 0-6 * * 1-5'  # UTC 0~6시 (한국 시간 오전 9시 ~ 오후 3시 30분)
   workflow_dispatch:
 
 jobs:
