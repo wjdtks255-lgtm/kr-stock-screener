@@ -1,11 +1,11 @@
-# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (DYNAMIC VOLATILITY & TP3 ENGINE)
+# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (MARKET HOURS FILTER)
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "20.1.8"
+V = "20.1.9"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -80,10 +80,27 @@ def calculate_atr(df, period=14):
     atr = tr.rolling(period).mean()
     return atr
 
+def is_market_open():
+    """국장 개장 시간 체크 (평일 오전 9:00 ~ 오후 3:30)"""
+    n = now()
+    if n.weekday() >= 5: # 주말 제외
+        return False
+    
+    current_time_minutes = n.hour * 60 + n.minute
+    market_start = 9 * 60       # 09:00
+    market_end = 15 * 60 + 30   # 15:30
+    
+    return market_start <= current_time_minutes <= market_end
+
 def main():
     print("====================================")
     print(f" KOREA STOCK HUNTER SCREENER V{V}")
     print("====================================")
+
+    # 장 시간이 아니면 스캔 및 분석 작업을 진행하지 않고 종료
+    if not is_market_open():
+        print(f"[MARKET CLOSED] 현재는 국장 운영 시간이 아닙니다. (KST: {ts()}) 작업을 건너뜁니다.")
+        return
 
     state = get_state()
     positions = state.get("positions", [])
@@ -133,11 +150,11 @@ def main():
             print(f"[ERROR] 종목 {code} 체크 중 오류:", e)
             updated_positions.append(pos)
 
-    # 2. 8개 슬롯 중 빈 자리가 있을 경우 동적 변동성 기반 신규 종목 스캔
+    # 2. 8개 슬롯 중 빈 자리가 있을 경우 장중 동적 신규 종목 스캔
     active_codes = [p.get("code") for p in updated_positions]
     
     if len(updated_positions) < MAX_SLOTS:
-        print(f"[SCAN] 빈 슬롯 존재 ({len(updated_positions)}/{MAX_SLOTS}). 동적 변동성 스캔 시작")
+        print(f"[SCAN] 빈 슬롯 존재 ({len(updated_positions)}/{MAX_SLOTS}). 장중 신규 종목 스캔 시작")
         
         try:
             krx = fdr.StockListing('KRX')
@@ -163,11 +180,9 @@ def main():
                 vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
 
                 if close > ma20 and volume > vol_ma20:
-                    # 종목별 변동성(ATR) 계산
                     atr_series = calculate_atr(df)
                     atr_val = float(atr_series.iloc[-1]) if not atr_series.empty and not np.isnan(atr_series.iloc[-1]) else close * 0.04
                     
-                    # 변동성에 따른 동적 비율 산정 (최소 3%, 최대 8% 안전장치)
                     volatility_pct = max(0.03, min(0.08, atr_val / close))
                     
                     entry = close
