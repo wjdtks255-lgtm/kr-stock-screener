@@ -5,14 +5,12 @@ import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "20.1.5"
+V = "20.1.6"
 STATE = "active_positions.json"
-LOG = "bot_log.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 KST = timezone(timedelta(hours=9))
 
-# 최대 슬롯 개수를 8개로 설정
 MAX_SLOTS = 8
 
 class NpEncoder(json.JSONEncoder):
@@ -79,7 +77,8 @@ def main():
     state = get_state()
     positions = state.get("positions", [])
 
-    print(f"[STATUS] 현재 유지 중인 포지션: {len(positions)} / {MAX_SLOTS}")
+    # 실행 시 텔레그램 상태 알림 전송 (연동 테스트 겸용)
+    tg(f"🤖 <b>[국장 스크리너] 스캔 시작</b>\n시간: {ts()}\n현재 포지션: {len(positions)} / {MAX_SLOTS} 개")
 
     # 1. 기존 유지 중인 포지션 청산 여부 및 TP/SL 체크
     updated_positions = []
@@ -98,11 +97,11 @@ def main():
 
             if current_price <= sl:
                 tg(f"🛡 <b>[국장 시그널] 손절가 도달</b>\n━━━━━━━━━━━━━━━━━━━━━━━\n종목: <b>{pos.get('name')} ({code})</b>\n청산가: <code>{m(current_price)}</code>")
-                continue # 포지션 종료 (제외하여 슬롯 비움)
+                continue
 
             if current_price >= tp1 and "TP1" not in hit:
                 hit.append("TP1")
-                pos["sl"] = pos["entry"] # 본전 스탑 설정
+                pos["sl"] = pos["entry"]
                 tg(f"🎯 <b>[국장 시그널] 1차 목표가 도달</b>\n종목: <b>{pos.get('name')} ({code})</b>\n본전 스탑으로 손절가 상향")
 
             updated_positions.append(pos)
@@ -110,18 +109,17 @@ def main():
             print(f"[ERROR] 종목 {code} 체크 중 오류:", e)
             updated_positions.append(pos)
 
-    # 2. 8개 슬롯 중 빈 자리가 있을 경우에만 신규 종목 스캔
+    # 2. 빈 슬롯 존재 시 신규 종목 스캔
     active_codes = [p.get("code") for p in updated_positions]
     
     if len(updated_positions) < MAX_SLOTS:
-        print(f"[SCAN] 빈 슬롯 존재 ({len(updated_positions)}/{MAX_SLOTS}). 신규 종목 검색을 시작합니다.")
+        print(f"[SCAN] 빈 슬롯 존재 ({len(updated_positions)}/{MAX_SLOTS}). 신규 종목 검색 시작")
         
-        # KOSPI / KOSDAQ 종목 목록 가져오기
         try:
             krx = fdr.StockListing('KRX')
-            # 거래량 및 시가총액 기준 상위 종목 필터링 예시
-            candidates = krx.dropna(subset=['Code', 'Name']).head(100)
+            candidates = krx.dropna(subset=['Code', 'Name']).head(300)
             
+            scanned_count = 0
             for _, row in candidates.iterrows():
                 if len(updated_positions) >= MAX_SLOTS:
                     break
@@ -142,8 +140,8 @@ def main():
                 volume = float(df['Volume'].iloc[-1])
                 vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
 
-                # 조건: 정배열(20일선 > 60일선) 및 평균 거래량 이상 분출 시 진입 조건
-                if close > ma20 and ma20 > ma60 and volume > (vol_ma20 * 1.5):
+                # 완화된 조건: 20일선 상회 및 평균 거래량 이상
+                if close > ma20 and volume > vol_ma20:
                     entry = close
                     sl = entry * 0.95
                     tp1 = entry * 1.05
@@ -162,6 +160,7 @@ def main():
                     
                     updated_positions.append(new_pos)
                     active_codes.append(code)
+                    scanned_count += 1
 
                     tg(f"""🚨 <b>[국장 시그널] 신규 추천 종목 포착</b> 🚨
 ━━━━━━━━━━━━━━━━━━━━━━━
@@ -171,12 +170,11 @@ def main():
 🛡 <b>손절가 (SL):</b> <code>{m(sl)}</code> (-5.0%)
 🎯 <b>1차 목표가 (TP1):</b> <code>{m(tp1)}</code> (+5.0%)
 🎯 <b>2차 목표가 (TP2):</b> <code>{m(tp2)}</code> (+10.0%)
-━━━━━━━━━━━━━━━━━━━━━━━
-📊 <b>분석:</b> 단기 정배열 및 거래량 분출 조건 충족""")
+━━━━━━━━━━━━━━━━━━━━━━━""")
         except Exception as e:
             print("[SCAN ERROR] 종목 스캔 중 오류 발생:", e)
     else:
-        print(f"[SCAN SKIP] 8개 슬롯이 모두 채워져 있어 신규 검색을 진행하지 않습니다.")
+        print("[SCAN SKIP] 8개 슬롯이 모두 채워져 있습니다.")
 
     state["positions"] = updated_positions
     save(STATE, state)
