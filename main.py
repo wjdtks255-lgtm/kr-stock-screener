@@ -1,11 +1,11 @@
-# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (HIGH WIN-RATE 70% OPTIMIZED V25.0)
+# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (HIGH WIN-RATE MASTER V26.0)
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "25.0.0"
+V = "26.0.0"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -62,11 +62,12 @@ def tg(x):
         return False
 
 def get_state():
-    s = load(STATE, {"positions": [], "sent": []})
+    s = load(STATE, {"positions": [], "sent": [], "daily_stats": {"date": "", "wins": 0, "losses": 0}})
     if not isinstance(s, dict):
-        s = {"positions": [], "sent": []}
+        s = {"positions": [], "sent": [], "daily_stats": {"date": "", "wins": 0, "losses": 0}}
     s.setdefault("positions", [])
     s.setdefault("sent", [])
+    s.setdefault("daily_stats", {"date": now().strftime("%Y-%m-%d"), "wins": 0, "losses": 0})
     return s
 
 def calculate_atr(df, period=14):
@@ -93,7 +94,7 @@ def is_market_open():
     return market_start <= current_time_minutes <= market_end
 
 def check_market_trend_and_leaders():
-    """코스피/코스닥 시장 흐름 변화 감지 및 주도주 분석 리포트 개별 전송"""
+    """코스피/코스닥 시장 흐름 감지 및 급락 경보, 주도주 분석 리포트 전송"""
     try:
         kospi_df = fdr.DataReader('KS11', datetime.now() - timedelta(days=5))
         kosdaq_df = fdr.DataReader('KQ11', datetime.now() - timedelta(days=5))
@@ -105,6 +106,16 @@ def check_market_trend_and_leaders():
         kosdaq_close = float(kosdaq_df['Close'].iloc[-1])
         kosdaq_prev = float(kosdaq_df['Close'].iloc[-2])
         kosdaq_chg = ((kosdaq_close - kosdaq_prev) / kosdaq_prev) * 100
+
+        # [시장 급락 경보 시스템] 코스피나 코스닥이 -2.0% 이상 급락 시 긴급 경보 발령
+        if kospi_chg <= -2.0 or kosdaq_chg <= -2.0:
+            tg(f"""🚨 <b>[긴급 시장 변동성 경보]</b> 🚨
+━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ 시장 지수가 급락세를 보이고 있습니다!
+• 코스피 등락: <code>{kospi_chg:+.2f}%</code>
+• 코스닥 등락: <code>{kosdaq_chg:+.2f}%</code>
+💡 <i>신규 매수를 일시 중단하고 리스크 관리에 집중하세요!</i>
+━━━━━━━━━━━━━━━━━━━━━━━""")
 
         krx = fdr.StockListing('KRX')
         top_stocks = krx.dropna(subset=['Code', 'Name']).head(40)
@@ -148,15 +159,20 @@ def main():
         print(f"[MARKET CLOSED] 현재는 국장 운영 시간이 아닙니다. (KST: {ts()}) 작업을 건너뜁니다.")
         return
 
-    # 1. 시장 동향 브리핑 전송
+    # 일일 통계 날짜 초기화 체크
+    state = get_state()
+    today_str = now().strftime("%Y-%m-%d")
+    daily_stats = state.get("daily_stats", {"date": today_str, "wins": 0, "losses": 0})
+    if daily_stats.get("date") != today_str:
+        daily_stats = {"date": today_str, "wins": 0, "losses": 0}
+
+    # 1. 시장 동향 및 경보 체크 전송
     check_market_trend_and_leaders()
 
-    state = get_state()
     positions = state.get("positions", [])
-
     print(f"[STATUS] 현재 유지 중인 포지션: {len(positions)} / {MAX_SLOTS}")
 
-    # 2. 기존 유지 중인 포지션 청산 여부 및 TP/SL 체크
+    # 2. 기존 포지션 청산, 목표가 및 타임스톱 체크
     updated_positions = []
     for pos in positions:
         code = pos.get("code")
@@ -172,9 +188,29 @@ def main():
             tp2 = pos.get("tp2", 0)
             tp3 = pos.get("tp3", 0)
             hit = pos.setdefault("hit", [])
+            
+            # [타임스톱 로직] 포착된 지 7거래일(일봉 기준 7개 이상)이 지났는데도 제자리인 경우 슬롯 회전을 위해 정리
+            entry_time_str = pos.get("time", ts())
+            try:
+                entry_date = datetime.strptime(entry_time_str.split()[0], "%Y-%m-%d")
+                days_elapsed = (now().date() - entry_date.date()).days
+            except:
+                days_elapsed = 0
+
+            if days_elapsed >= 7 and not hit:
+                daily_stats["losses"] += 1
+                tg(f"""⏱ <b>[타임스톱 회전 청산 리포트]</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+종목명: <b>{pos.get('name')} ({code})</b>
+보유 기간: 7일 경과 (방향성 부재)
+청산가격: <code>{m(current_price)}</code>
+📌 <i>슬롯 회전율을 높이기 위해 원금 기준으로 정리합니다.</i>
+━━━━━━━━━━━━━━━━━━━━━━━""")
+                continue
 
             if current_price <= sl:
-                tg(f"""🛡 <b>[손절가(SL) 도달 청산 리포트]</b>
+                daily_stats["losses"] += 1
+                tg(f"""🛡 <b>[손절가(SL) 도달 청산 리포트]</b> ❌
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
 청산가격: <code>{m(current_price)}</code>
@@ -186,7 +222,8 @@ def main():
                 if "TP1" not in hit: hit.append("TP1")
                 if "TP2" not in hit: hit.append("TP2")
                 if "TP3" not in hit: hit.append("TP3")
-                tg(f"""🏆 <b>[3차 목표가 완수 리포트]</b>
+                daily_stats["wins"] += 1
+                tg(f"""🏆 <b>[3차 목표가 완수 리포트]</b> 🔥
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
 최종 청산가: <code>{m(current_price)}</code>
@@ -217,7 +254,7 @@ def main():
             print(f"[ERROR] 종목 {code} 체크 중 오류:", e)
             updated_positions.append(pos)
 
-    # 3. 15개 슬롯 빈자리 스캔 (고승률 필터 적용: 거래대금 상위 150개 대상)
+    # 3. 신규 종목 스캔 (고승률 필터 + 분할 매수 비중 가이드 추가)
     active_codes = [p.get("code") for p in updated_positions]
     
     if len(updated_positions) < MAX_SLOTS:
@@ -226,8 +263,6 @@ def main():
         try:
             krx = fdr.StockListing('KRX')
             priority_codes = ['005930', '000660', '010130'] # 삼성전자, 하이닉스, 고려아연
-            
-            # 타임아웃 방지를 위해 거래대금/유동성이 풍부한 상위 150개 내외로 후보군 최적화
             candidates = krx.dropna(subset=['Code', 'Name']).head(150)
             
             scan_rows = []
@@ -258,31 +293,26 @@ def main():
                     if not (3000 <= close <= 1000000):
                         continue
 
-                    # [고승률 필터 조건 강화]
-                    # 1. 20일 이평선 돌파 및 정배열 (5일선 > 20일선)
                     ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
                     ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
                     volume = float(df['Volume'].iloc[-1])
                     vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
                     
-                    # 2. 거래대금 최소 50억 원 이상 (세력 수급 밀집도 강화)
                     trading_value = close * volume
-                    if trading_value < 5_000_000_000:
+                    if trading_value < 5_000_000_000: # 거래대금 50억 이상
                         continue
 
-                    # 정배열 및 거래량 증가 조건 동시 충족
                     if close > ma20 and ma5 > ma20 and volume > vol_ma20:
                         atr_series = calculate_atr(df)
                         atr_val = float(atr_series.iloc[-1]) if not atr_series.empty and not np.isnan(atr_series.iloc[-1]) else close * 0.035
                         
-                        # 손실 폭을 좁히고(최대 4%), 목표가를 넓게 가져가는 7:3 최적 비율 설계
                         volatility_pct = max(0.02, min(0.045, atr_val / close))
                         
                         entry = close
-                        sl = entry * (1 - volatility_pct)              # 손절 (-2% ~ -4.5%)
-                        tp1 = entry * (1 + volatility_pct * 1.5)      # 1차 목표
-                        tp2 = entry * (1 + volatility_pct * 2.8)      # 2차 목표
-                        tp3 = entry * (1 + volatility_pct * 4.2)      # 3차 목표 (수익 극대화)
+                        sl = entry * (1 - volatility_pct)
+                        tp1 = entry * (1 + volatility_pct * 1.5)
+                        tp2 = entry * (1 + volatility_pct * 2.8)
+                        tp3 = entry * (1 + volatility_pct * 4.2)
 
                         sl_pct_str = f"-{volatility_pct*100:.1f}%"
                         tp1_pct_str = f"+{volatility_pct*1.5*100:.1f}%"
@@ -329,7 +359,7 @@ def main():
 🎯 <b>2차 목표가 (TP2):</b> <code>{m(tp2)}</code> ({tp2_pct_str})
 🎯 <b>3차 목표가 (TP3):</b> <code>{m(tp3)}</code> ({tp3_pct_str})
 ━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>승률 70% 타겟 리스크 관리 모드가 적용되었습니다.</i>""")
+💡 <b>[매매 가이드]</b> 전체 자금의 <b>5~7% 이내</b>로 분할 매수하고, 본 종목은 승률 70% 타겟 리스크 관리 모드가 적용됩니다.""")
                 except Exception as inner_e:
                     print(f"[CANDIDATE ERROR] 종목 {code} 처리 중 예외:", inner_e)
                     continue
@@ -338,7 +368,25 @@ def main():
     else:
         print("[SCAN SKIP] 15개 슬롯이 모두 채워져 있습니다.")
 
+    # 장 마감 시간대(예: 오후 3시 20분 이후)에 오늘 하루 성과 통계를 요약 전송하는 로직
+    n = now()
+    if n.hour == 15 and 20 <= n.minute <= 35:
+        total_trades = daily_stats["wins"] + daily_stats["losses"]
+        win_rate = (daily_stats["wins"] / total_trades * 100) if total_trades > 0 else 0
+        
+        tg(f"""📈 <b>[장 마감 일일 성과 리포트]</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+날짜: {today_str}
+• 총 청산 건수: {total_trades}건
+• 성공 (TP 도달): {daily_stats['wins']}건 🔥
+• 실패 (손절/타임스톱): {daily_stats['losses']}건 🛡
+• <b>오늘의 달성 승률: <code>{win_rate:.1f}%</code></b>
+• 현재 유지 중인 슬롯: {len(updated_positions)} / {MAX_SLOTS}
+━━━━━━━━━━━━━━━━━━━━━━━
+💡 <i>오늘 하루도 수고하셨습니다. 원칙 매매 승승장구하세요!</i>""")
+
     state["positions"] = updated_positions
+    state["daily_stats"] = daily_stats
     save(STATE, state)
     print(f"[DONE] 최신 상태가 {STATE} 파일에 저장되었습니다.")
 
