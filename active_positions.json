@@ -35,9 +35,15 @@
     }
   ],
   "sent": [],
-  "daily_stats": {
-    "date": "2026-10-20",
+  "total_stats": {
     "wins": 0,
+    "draws": 0,
+    "losses": 0
+  },
+  "monthly_stats": {
+    "month": "2026-10",
+    "wins": 0,
+    "draws": 0,
     "losses": 0
   }
 }
