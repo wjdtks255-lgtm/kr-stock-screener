@@ -1,17 +1,17 @@
-# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (DUAL STATS TRACKER V28.0)
+# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (3-WAY STATS BREAKEVEN V29.0)
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "28.0.0"
+V = "29.0.0"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 KST = timezone(timedelta(hours=9))
 
-MAX_SLOTS = 15  # 15개 슬롯 유지
+MAX_SLOTS = 15  # 슬롯 유지
 
 class NpEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -63,23 +63,28 @@ def tg(x):
 
 def get_state():
     current_month = now().strftime("%Y-%m")
+    default_stats = {"wins": 0, "draws": 0, "losses": 0}
     default_state = {
         "positions": [], 
         "sent": [], 
-        "total_stats": {"wins": 0, "losses": 0},
-        "monthly_stats": {"month": current_month, "wins": 0, "losses": 0}
+        "total_stats": dict(default_stats),
+        "monthly_stats": {"month": current_month, **default_stats}
     }
     s = load(STATE, default_state)
     if not isinstance(s, dict):
         s = default_state
     s.setdefault("positions", [])
     s.setdefault("sent", [])
-    s.setdefault("total_stats", {"wins": 0, "losses": 0})
+    s.setdefault("total_stats", dict(default_stats))
     
-    # 월이 바뀐 경우 월간 통계 자동 초기화
-    monthly = s.get("monthly_stats", {"month": current_month, "wins": 0, "losses": 0})
+    # 신규 카테고리(draws) 예외 안전 장치
+    s["total_stats"].setdefault("draws", 0)
+    
+    monthly = s.get("monthly_stats", {"month": current_month, **default_stats})
     if monthly.get("month") != current_month:
-        s["monthly_stats"] = {"month": current_month, "wins": 0, "losses": 0}
+        s["monthly_stats"] = {"month": current_month, **default_stats}
+    else:
+        s["monthly_stats"].setdefault("draws", 0)
         
     return s
 
@@ -163,21 +168,23 @@ def check_market_trend_and_leaders():
         print("[MARKET TREND ERROR]", e)
 
 def get_stats_string(total_stats, monthly_stats):
-    """전체 누적 및 이번 달 월간 전적 문자열 생성"""
-    t_wins = total_stats.get("wins", 0)
-    t_losses = total_stats.get("losses", 0)
-    t_total = t_wins + t_losses
-    t_rate = (t_wins / t_total * 100) if t_total > 0 else 0.0
+    """세분화된 전적 및 승률 문자열 생성"""
+    def format_single(s_dict, title):
+        w = s_dict.get("wins", 0)
+        d = s_dict.get("draws", 0)
+        l = s_dict.get("losses", 0)
+        total = w + d + l
+        win_rate = (w / total * 100) if total > 0 else 0.0
+        defense_rate = ((w + d) / total * 100) if total > 0 else 0.0
+        return f"• <b>{title}:</b> 총 {total}전 {w}승 {d}무 {l}패 (승률: <b>{win_rate:.1f}%</b> | 방어율: <b>{defense_rate:.1f}%</b>)"
 
-    m_wins = monthly_stats.get("wins", 0)
-    m_losses = monthly_stats.get("losses", 0)
-    m_total = m_wins + m_losses
-    m_rate = (m_wins / m_total * 100) if m_total > 0 else 0.0
+    t_str = format_single(total_stats, "전체 누적")
     m_label = monthly_stats.get("month", "이번 달")
+    m_str = format_single(monthly_stats, f"{m_label} 전적")
 
     return (f"📊 <b>[전적 통계 브리핑]</b>\n"
-            f"• <b>전체 누적:</b> 총 {t_total}전 {t_wins}승 {t_losses}패 (승률: <b>{t_rate:.1f}%</b>)\n"
-            f"• <b>{m_label} 전적:</b> 총 {m_total}전 {m_wins}승 {m_losses}패 (승률: <b>{m_rate:.1f}%</b>)")
+            f"{t_str}\n"
+            f"{m_str}")
 
 def main():
     print("====================================")
@@ -189,8 +196,8 @@ def main():
         return
 
     state = get_state()
-    total_stats = state.get("total_stats", {"wins": 0, "losses": 0})
-    monthly_stats = state.get("monthly_stats", {"month": now().strftime("%Y-%m"), "wins": 0, "losses": 0})
+    total_stats = state.get("total_stats")
+    monthly_stats = state.get("monthly_stats")
 
     # 1. 시장 동향 및 경보 체크 전송
     check_market_trend_and_leaders()
@@ -210,6 +217,7 @@ def main():
             
             current_price = float(df['Close'].iloc[-1])
             sl = pos.get("sl", 0)
+            entry = pos.get("entry", 0)
             tp1 = pos.get("tp1", 0)
             tp2 = pos.get("tp2", 0)
             tp3 = pos.get("tp3", 0)
@@ -222,38 +230,49 @@ def main():
             except:
                 days_elapsed = 0
 
-            # [타임스톱 청산]
+            # [타임스톱 청산] -> 본전/소손절 방어(Draws)로 집계
             if days_elapsed >= 7 and not hit:
-                total_stats["losses"] += 1
-                monthly_stats["losses"] += 1
+                total_stats["draws"] += 1
+                monthly_stats["draws"] += 1
                 stats_msg = get_stats_string(total_stats, monthly_stats)
-                tg(f"""⏱ <b>[타임스톱 회전 청산 리포트]</b>
+                tg(f"""⏱ <b>[타임스톱 회전 청산 리포트]</b> ⚖️
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
 보유 기간: 7일 경과 (방향성 부재)
 청산가격: <code>{m(current_price)}</code>
-📌 <i>슬롯 회전율을 높이기 위해 원금 기준으로 정리합니다.</i>
+📌 <i>슬롯 회전율을 위해 본전 및 방어 마감 처리합니다.</i>
 -----------------------------------------------
 {stats_msg}
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [손절가 청산]
+            # [손절가/본전스탑 이탈 판정]
             if current_price <= sl:
-                total_stats["losses"] += 1
-                monthly_stats["losses"] += 1
+                # 핵심 판정: 손절가가 진입가(entry) 이상으로 올라가 있던 경우 -> 본전 방어(Draws)
+                if sl >= entry or "TP1" in hit:
+                    total_stats["draws"] += 1
+                    monthly_stats["draws"] += 1
+                    report_title = "⚖️ <b>[본전스탑(Break-Even) 방어 리포트]</b> 🛡"
+                    report_desc = "📌 <i>1차 목표 달성 후 본전스탑이 발동하여 원금을 안전하게 방어했습니다.</i>"
+                else:
+                    # pure 손절 -> Losses
+                    total_stats["losses"] += 1
+                    monthly_stats["losses"] += 1
+                    report_title = "🛡 <b>[손절가(SL) 도달 청산 리포트]</b> ❌"
+                    report_desc = "📌 <i>원칙 매매를 위해 손절 처리가 완료되었습니다.</i>"
+
                 stats_msg = get_stats_string(total_stats, monthly_stats)
-                tg(f"""🛡 <b>[손절가(SL) 도달 청산 리포트]</b> ❌
+                tg(f"""{report_title}
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
 청산가격: <code>{m(current_price)}</code>
-📌 <i>원칙 매매를 위해 손절 처리가 완료되었습니다.</i>
+{report_desc}
 -----------------------------------------------
 {stats_msg}
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [3차 목표가 완수]
+            # [3차 목표가 완수] -> 완벽 승리(Wins)
             if current_price >= tp3:
                 if "TP1" not in hit: hit.append("TP1")
                 if "TP2" not in hit: hit.append("TP2")
@@ -282,7 +301,7 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━━━━""")
             elif current_price >= tp1 and "TP1" not in hit:
                 hit.append("TP1")
-                pos["sl"] = pos["entry"]
+                pos["sl"] = pos["entry"]  # 본전 스탑 상향
                 tg(f"""🎯 <b>[1차 목표가 달성 리포트]</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
