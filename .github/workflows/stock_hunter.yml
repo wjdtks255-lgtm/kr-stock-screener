@@ -1,21 +1,14 @@
-name: Korea Stock Hunter Screener
-
-concurrency:
-  group: kr-stock-screener
-  cancel-in-progress: true
+name: Korea Stock Hunter Bot (5min Cron)
 
 on:
   schedule:
-    - cron: '*/15 0-6 * * 1-5'  # UTC 0~6시 (한국 시간 오전 9시 ~ 오후 3시 30분)
-  workflow_dispatch:
+    - cron: '*/5 * * * *'  # 평일/주말 5분마다 자동 실행 (코드 내에서 장중 시간 체크 필터링 작동)
+  workflow_dispatch:      # 깃허브 웹에서 수동으로도 즉시 실행 가능
 
 jobs:
-  run-stock-bot:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,21 +22,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
+          pip install pandas numpy finance-datareader requests
 
-      - name: Run Stock Screener
+      - name: Run Main Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python main.py
 
-      - name: Commit and push changes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          file_pattern: active_positions.json
-          commit_message: "Update Korea Stock Hunter state [skip ci]"
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Commit and Push state changes (active_positions.json)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add active_positions.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update position stats [skip ci]" && git push)
