@@ -1,11 +1,11 @@
-# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (3-WAY STATS BREAKEVEN V29.0)
+# KOREA STOCK HUNTER SCREENER & SIGNAL BOT (PROFIT WIN STATS MASTER V30.0)
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "29.0.0"
+V = "30.0.0"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -76,8 +76,6 @@ def get_state():
     s.setdefault("positions", [])
     s.setdefault("sent", [])
     s.setdefault("total_stats", dict(default_stats))
-    
-    # 신규 카테고리(draws) 예외 안전 장치
     s["total_stats"].setdefault("draws", 0)
     
     monthly = s.get("monthly_stats", {"month": current_month, **default_stats})
@@ -168,7 +166,7 @@ def check_market_trend_and_leaders():
         print("[MARKET TREND ERROR]", e)
 
 def get_stats_string(total_stats, monthly_stats):
-    """세분화된 전적 및 승률 문자열 생성"""
+    """실제 수익 거래(TP1/TP2/TP3)가 승리로 포함된 전적 리포트 생성"""
     def format_single(s_dict, title):
         w = s_dict.get("wins", 0)
         d = s_dict.get("draws", 0)
@@ -230,32 +228,41 @@ def main():
             except:
                 days_elapsed = 0
 
-            # [타임스톱 청산] -> 본전/소손절 방어(Draws)로 집계
-            if days_elapsed >= 7 and not hit:
-                total_stats["draws"] += 1
-                monthly_stats["draws"] += 1
+            # [타임스톱 청산] -> TP1/TP2를 달성한 상태에서 타임스톱이면 승리(Wins), 달성 못했으면 무승부(Draws)
+            if days_elapsed >= 7:
+                if "TP1" in hit or "TP2" in hit:
+                    total_stats["wins"] += 1
+                    monthly_stats["wins"] += 1
+                    report_title = "🏆 <b>[수익 확보 타임스톱 청산 리포트]</b> 🔥"
+                    report_desc = "📌 <i>TP1/TP2 수익 달성 후 7일 경과로 잔여 물량을 수익 청산합니다.</i>"
+                else:
+                    total_stats["draws"] += 1
+                    monthly_stats["draws"] += 1
+                    report_title = "⏱ <b>[타임스톱 회전 청산 리포트]</b> ⚖️"
+                    report_desc = "📌 <i>방향성 부재로 슬롯 회전율을 위해 원금 마감 처리합니다.</i>"
+
                 stats_msg = get_stats_string(total_stats, monthly_stats)
-                tg(f"""⏱ <b>[타임스톱 회전 청산 리포트]</b> ⚖️
+                tg(f"""{report_title}
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
-보유 기간: 7일 경과 (방향성 부재)
+보유 기간: 7일 경과
 청산가격: <code>{m(current_price)}</code>
-📌 <i>슬롯 회전율을 위해 본전 및 방어 마감 처리합니다.</i>
+{report_desc}
 -----------------------------------------------
 {stats_msg}
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [손절가/본전스탑 이탈 판정]
+            # [손절가 / 스탑라인 이탈 판정]
             if current_price <= sl:
-                # 핵심 판정: 손절가가 진입가(entry) 이상으로 올라가 있던 경우 -> 본전 방어(Draws)
-                if sl >= entry or "TP1" in hit:
-                    total_stats["draws"] += 1
-                    monthly_stats["draws"] += 1
-                    report_title = "⚖️ <b>[본전스탑(Break-Even) 방어 리포트]</b> 🛡"
-                    report_desc = "📌 <i>1차 목표 달성 후 본전스탑이 발동하여 원금을 안전하게 방어했습니다.</i>"
+                # [핵심 로직] TP1이나 TP2를 터치한 후 스탑라인에 걸린 경우 -> 확실한 '수익 승리(Wins)'로 처리!
+                if "TP1" in hit or "TP2" in hit or sl > entry:
+                    total_stats["wins"] += 1
+                    monthly_stats["wins"] += 1
+                    report_title = "🎯 <b>[수익 확보(TP 달성) 마감 리포트]</b> 🔥"
+                    report_desc = "📌 <i>1차/2차 목표 달성으로 이미 수익을 확보한 뒤 안전하게 승리(Wins)로 마감되었습니다!</i>"
                 else:
-                    # pure 손절 -> Losses
+                    # TP1도 못 터치하고 진입가 이하 초기 손절가 이탈 -> pure 손절(Losses)
                     total_stats["losses"] += 1
                     monthly_stats["losses"] += 1
                     report_title = "🛡 <b>[손절가(SL) 도달 청산 리포트]</b> ❌"
@@ -272,7 +279,7 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [3차 목표가 완수] -> 완벽 승리(Wins)
+            # [3차 목표가 완수] -> 당연히 완벽 승리(Wins)
             if current_price >= tp3:
                 if "TP1" not in hit: hit.append("TP1")
                 if "TP2" not in hit: hit.append("TP2")
@@ -297,15 +304,15 @@ def main():
                 tg(f"""🎯 <b>[2차 목표가 달성 리포트]</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
-조치사항: <b>손절가를 1차 목표가({m(tp1)})로 상향합니다.</b>
+조치사항: <b>손절가를 1차 목표가({m(tp1)})로 상향합니다. (수익 확정)</b>
 ━━━━━━━━━━━━━━━━━━━━━━━""")
             elif current_price >= tp1 and "TP1" not in hit:
                 hit.append("TP1")
-                pos["sl"] = pos["entry"]  # 본전 스탑 상향
+                pos["sl"] = pos["entry"]
                 tg(f"""🎯 <b>[1차 목표가 달성 리포트]</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
 종목명: <b>{pos.get('name')} ({code})</b>
-조치사항: <b>손절가를 본전({m(pos['entry'])})으로 상향(본전 스탑)합니다.</b>
+조치사항: <b>손절가를 본전({m(pos['entry'])})으로 상향하여 리스크를 제거합니다.</b>
 ━━━━━━━━━━━━━━━━━━━━━━━""")
 
             updated_positions.append(pos)
