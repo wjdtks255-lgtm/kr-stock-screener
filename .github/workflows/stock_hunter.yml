@@ -1,8 +1,8 @@
-name: Korea Stock Hunter Bot (5min Cron)
+name: Korea Stock Hunter Bot (Cron-job.org Trigger)
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'  # 평일/주말 5분마다 자동 실행 (코드 내에서 장중 시간 체크 필터링 작동)
+  repository_dispatch:
+    types: [run-bot]
   workflow_dispatch:      # 깃허브 웹에서 수동으로도 즉시 실행 가능
 
 jobs:
