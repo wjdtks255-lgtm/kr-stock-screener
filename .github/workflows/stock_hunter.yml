@@ -1,9 +1,13 @@
 name: Korea Stock Hunter Bot (Cron-job.org Trigger)
 
+concurrency:
+  group: kr-stock-bot-running
+  cancel-in-progress: true
+
 on:
   repository_dispatch:
     types: [run-bot]
-  workflow_dispatch:      # 깃허브 웹에서 수동으로도 즉시 실행 가능
+  workflow_dispatch:
 
 jobs:
   run-bot:
