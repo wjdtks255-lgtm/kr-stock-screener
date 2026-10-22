@@ -1,18 +1,17 @@
 name: Korea Stock Hunter Bot (Cron-job.org Trigger)
 
-concurrency:
-  group: kr-stock-bot-running
-  cancel-in-progress: true
-
 on:
   repository_dispatch:
     types: [run-bot]
   workflow_dispatch:
 
 jobs:
-  run-bot:
+  build:
     runs-on: ubuntu-latest
-    
+    concurrency:
+      group: run-bot-lock
+      cancel-in-progress: false
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,18 +25,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy finance-datareader requests
+          pip install pandas numpy requests finance-reader
 
       - name: Run Main Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python main.py
+          CHAT_ID: ${{ secrets.CHAT_ID }}  # 깃허브 시크릿 이름과 일치
+        run: python main.py
 
       - name: Commit and Push state changes (active_positions.json)
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add active_positions.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update position stats [skip ci]" && git push)
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update position states and stats [skip ci]"
+          branch: main
