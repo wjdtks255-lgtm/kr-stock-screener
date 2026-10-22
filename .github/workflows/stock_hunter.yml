@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests FinanceDataReader
+          pip install pandas numpy requests finance-datareader
 
       - name: Run Main Script
         env:
