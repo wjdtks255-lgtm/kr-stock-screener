@@ -60,12 +60,22 @@
   "total_stats": {
     "wins": 0,
     "draws": 0,
-    "losses": 1
+    "losses": 1,
+    "total_closed": 0,
+    "tp3_end": 0,
+    "tp2_end": 0,
+    "tp1_end": 0,
+    "loss_end": 0
   },
   "monthly_stats": {
     "month": "2026-10",
     "wins": 0,
     "draws": 0,
-    "losses": 1
+    "losses": 1,
+    "total_closed": 0,
+    "tp3_end": 0,
+    "tp2_end": 0,
+    "tp1_end": 0,
+    "loss_end": 0
   }
 }
