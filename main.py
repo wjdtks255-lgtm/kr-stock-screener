@@ -1,17 +1,17 @@
-# KOREA MULTI-STRATEGY HUNTER & STATS ENGINE V32.1.1
+# KOREA MULTI-STRATEGY HUNTER & STATS ENGINE V32.1.2
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "32.1.1"
+V = "32.1.2"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT = os.getenv("CHAT_ID", "")  # 깃허브 시크릿 CHAT_ID와 정확히 일치시킴
+CHAT = os.getenv("CHAT_ID", "")
 KST = timezone(timedelta(hours=9))
 
-MAX_SLOTS = 8  # 슬롯 8개 설정
+MAX_SLOTS = 8
 
 class NpEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -48,7 +48,7 @@ def load(p, d):
 
 def tg(x):
     if not TOKEN or not CHAT: 
-        print(f"[TG CONFIG ERROR] Token or Chat ID is missing. (TOKEN: {'OK' if TOKEN else 'MISSING'}, CHAT_ID: {'OK' if CHAT else 'MISSING'})")
+        print(f"[TG CONFIG ERROR] Token or Chat ID is missing.")
         return False
     try:
         r = requests.post(
@@ -74,6 +74,7 @@ def get_state():
     default_state = {
         "positions": [], 
         "sent": [], 
+        "last_bear_state": None,  # 이전 방어 모드 상태 기록용
         "total_stats": dict(default_stats),
         "monthly_stats": {"month": current_month, **default_stats}
     }
@@ -82,7 +83,9 @@ def get_state():
         s = default_state
     s.setdefault("positions", [])
     s.setdefault("sent", [])
+    s.setdefault("last_bear_state", None)
     s.setdefault("total_stats", dict(default_stats))
+    
     for k in default_stats:
         if k != "month":
             s["total_stats"].setdefault(k, 0)
@@ -119,7 +122,7 @@ def is_market_open():
     
     return market_start <= current_time_minutes <= market_end
 
-def check_market_shield_and_report():
+def check_market_shield_and_report(last_bear_state):
     is_bear_market = False
     reasons = []
     
@@ -149,9 +152,11 @@ def check_market_shield_and_report():
             is_bear_market = True
             reasons.append(f"시장 지수 당일 급락 발생 (코스피: {kospi_chg:+.2f}%, 코스닥: {kosdaq_chg:+.2f}%)")
 
-        if is_bear_market:
-            reason_str = "\n".join([f"• {r}" for r in reasons])
-            tg(f"""🛡 <b>[하락장 방어 모드 자동 발동]</b> 🚨
+        # 💡 상태 변경 시에만 알림 발송 (중복 방지)
+        if last_bear_state != is_bear_market:
+            if is_bear_market:
+                reason_str = "\n".join([f"• {r}" for r in reasons])
+                tg(f"""🛡 <b>[하락장 방어 모드 자동 발동]</b> 🚨
 ━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ <b>시장 지수 악화로 신규 멀티 전략 스캔 및 매수를 일시 중단합니다.</b>
 
@@ -162,13 +167,15 @@ def check_market_shield_and_report():
 🔍 <b>[방어 모드 발동 사유]</b>
 {reason_str}
 ━━━━━━━━━━━━━━━━━━━━━━━""")
-        else:
-            tg(f"""📊 <b>[멀티 전략 시장 동향 리포트]</b>
+            else:
+                tg(f"""📊 <b>[상승/횡보장 전환: 스캐너 가동]</b> 📈
 ━━━━━━━━━━━━━━━━━━━━━━━
 🇰🇷 <b>코스피:</b> <code>{kospi_close:,.2f}</code> ({kospi_chg:+.2f}%)
 🇰🇷 <b>코스닥:</b> <code>{kosdaq_close:,.2f}</code> ({kosdaq_chg:+.2f}%)
-📈 <i>지수 안정세: 멀티 전략(눌림목·종가베팅·낙폭과대) 스캐너가 가동됩니다.</i>
+📈 <i>지수 회복 완료: 멀티 전략(눌림목·종가베팅·낙폭과대) 스캐너가 다시 가동됩니다.</i>
 ━━━━━━━━━━━━━━━━━━━━━━━""")
+        else:
+            print(f"[MARKET SHIELD] 시장 상태 변동 없음 (현재 방어모드: {is_bear_market}). 메시지 발송 건너뜀.")
 
         return is_bear_market
     except Exception as e:
@@ -224,8 +231,10 @@ def main():
     state = get_state()
     total_stats = state.get("total_stats")
     monthly_stats = state.get("monthly_stats")
+    last_bear_state = state.get("last_bear_state")
 
-    is_bear_market = check_market_shield_and_report()
+    is_bear_market = check_market_shield_and_report(last_bear_state)
+    state["last_bear_state"] = is_bear_market  # 최신 상태 업데이트
 
     positions = state.get("positions", [])
     print(f"[STATUS] 현재 유지 중인 포지션: {len(positions)} / {MAX_SLOTS}")
@@ -325,7 +334,7 @@ def main():
     active_codes = [p.get("code") for p in updated_positions]
     
     if is_bear_market:
-        print("[BEAR MARKET SHIELD] 하락장 방어 모드 발동으로 신규 멀티 스캔을 중단합니다.")
+        print("[BEAR MARKET SHIELD] 하락장 방어 모드 발동 중이므로 신규 스캔을 하지 않습니다.")
     elif len(updated_positions) < MAX_SLOTS:
         print(f"[SCAN] 빈 슬롯 존재 ({len(updated_positions)}/{MAX_SLOTS}). 멀티 전략 스캔 시작")
         
