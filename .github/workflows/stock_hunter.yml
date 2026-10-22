@@ -25,12 +25,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests finance-reader
+          pip install pandas numpy requests FinanceDataReader
 
       - name: Run Main Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}  # 깃허브 시크릿 이름과 일치
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python main.py
 
       - name: Commit and Push state changes (active_positions.json)
