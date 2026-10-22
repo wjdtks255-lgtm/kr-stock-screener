@@ -43,17 +43,6 @@
       "tp3": 85170.0,
       "hit": [],
       "time": "2026-10-21 15:03:36"
-    },
-    {
-      "code": "006400",
-      "name": "삼성SDI",
-      "entry": 552000.0,
-      "sl": 527160.0,
-      "tp1": 589259.9999999999,
-      "tp2": 621551.9999999999,
-      "tp3": 656328.0,
-      "hit": [],
-      "time": "2026-10-21 15:21:17"
     }
   ],
   "sent": [],
@@ -61,21 +50,21 @@
     "wins": 0,
     "draws": 0,
     "losses": 1,
-    "total_closed": 0,
+    "total_closed": 1,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 0
+    "loss_end": 1
   },
   "monthly_stats": {
     "month": "2026-10",
     "wins": 0,
     "draws": 0,
     "losses": 1,
-    "total_closed": 0,
+    "total_closed": 1,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 0
+    "loss_end": 1
   }
 }
