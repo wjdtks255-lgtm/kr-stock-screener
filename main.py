@@ -1,17 +1,17 @@
-# KOREA MULTI-STRATEGY PROFIT MAXIMIZER & INTELLIGENCE V32.1.6
+# KOREA MULTI-STRATEGY PROFIT MAXIMIZER & LIVE MONITOR V32.1.8
 import os, json, time, requests, re
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "32.1.6"
+V = "32.1.8"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("CHAT_ID", "")
 KST = timezone(timedelta(hours=9))
 
-MAX_SLOTS = 8
+MAX_SLOTS = 8  # 최대 슬롯 8개 고정
 
 class NpEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -181,16 +181,83 @@ def update_stats_record(stats_dict, end_type):
     elif end_type == 'LOSS': stats_dict["loss_end"] += 1
     elif end_type == 'DRAW': stats_dict["draws"] += 1
 
+# 💡 장 시작 전 / 마감 후 정기 포트폴리오 슬롯 현황 전송 함수
+def send_slot_status_report(positions, is_bear):
+    bear_text = "하락장 방어 모드 유지 중" if is_bear else "정상 매매 모드 가동 중"
+    used_slots = len(positions)
+    avail_slots = MAX_SLOTS - used_slots
+    
+    msg_lines = [
+        "📊 <b>[실시간 포트폴리오 슬롯 현황]</b> 📊",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 <b>보유 슬롯: [ {used_slots} / {MAX_SLOTS} ]</b> ({avail_slots}개 가용 중)",
+        f"🛡 <b>시장 상태:</b> {bear_text}\n",
+        "🪙 <b>[현재 보유 포지션 리스트]</b>\n"
+    ]
+    
+    if not positions:
+        msg_lines.append("현재 보유 중인 포지션이 없습니다.")
+    else:
+        for idx, pos in enumerate(positions, 1):
+            code = pos.get("code")
+            name = pos.get("name")
+            entry = pos.get("entry", 0)
+            sl = pos.get("sl", 0)
+            tp1 = pos.get("tp1", 0)
+            
+            curr_price = entry
+            pct_chg = 0.0
+            try:
+                df = fdr.DataReader(code)
+                if not df.empty:
+                    curr_price = float(df['Close'].iloc[-1])
+                    pct_chg = ((curr_price - entry) / entry) * 100
+            except: pass
+            
+            sl_pct = ((sl - entry) / entry) * 100
+            tp1_pct = ((tp1 - entry) / entry) * 100
+            naver_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
+            tv_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
+            
+            item_txt = f"""{idx}️⃣ <b>{name} ({code})</b>
+• <b>진입가:</b> {m(entry)}
+• <b>현재가:</b> {m(curr_price)} (<code>{pct_chg:+.2f}%</code>)
+• <b>손절가(SL):</b> {m(sl)} ({sl_pct:.1f}%)
+• <b>1차 목표가(TP1):</b> {m(tp1)} (+{tp1_pct:.1f}%)
+• <b>상태:</b> 손절가 상회 홀딩 중 🟢
+📲 차트: <a href="{naver_url}">네이버</a> | <a href="{tv_url}">트레이딩뷰</a>"""
+            msg_lines.append(item_txt)
+            
+    msg_lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━")
+    msg_lines.append("💡 <i>장중 5분 주기로 손절가 및 목표가 도착 여부를 실시간 감시하고 있습니다.</i>")
+    tg("\n".join(msg_lines))
+
 def main():
     print(f" KOREA MULTI-STRATEGY PROFIT MAXIMIZER V{V}")
-    if not is_market_open(): return
-
+    
     state = get_state()
     total_stats, monthly_stats, last_bear_state = state.get("total_stats"), state.get("monthly_stats"), state.get("last_bear_state")
     is_bear_market = check_market_shield_and_report(last_bear_state)
     state["last_bear_state"] = is_bear_market
-
     positions = state.get("positions", [])
+
+    # 💡 정기 알림 체크 (08:55 장 시작 전, 15:35 장 마감 후 슬롯 리포트 발송)
+    n = now()
+    cur_time_str = n.strftime("%H:%M")
+    sent_reports = state.get("sent_reports", [])
+    today_str = n.strftime("%Y-%m-%d")
+    
+    if cur_time_str in ["08:55", "15:35"]:
+        report_key = f"{today_str}_{cur_time_str}"
+        if report_key not in sent_reports:
+            send_slot_status_report(positions, is_bear_market)
+            sent_reports.append(report_key)
+            state["sent_reports"] = sent_reports[-10:] # 최근 10개만 유지
+
+    if not is_market_open(): 
+        save(STATE, state)
+        return
+
     updated_positions = []
 
     for pos in positions:
@@ -241,6 +308,29 @@ def main():
                     update_stats_record(monthly_stats, 'LOSS')
                     tg(f"🛑 <b>[최소 손절 마감]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
                 continue
+
+            # 💡 보유 종목 이슈/뉴스 업데이트 감시 (중복 방지)
+            latest_news = get_stock_news(code)
+            saved_news = pos.get("last_news", "")
+            if latest_news and latest_news != saved_news:
+                pos["last_news"] = latest_news
+                pct_chg = ((current_price - entry) / entry) * 100
+                naver_chart_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
+                tv_chart_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
+                
+                tg(f"""🔔 <b>[보유 종목 실시간 이슈 포착]</b> 🔥
+━━━━━━━━━━━━━━━━━━━━━━━
+🪙 <b>종목명:</b> <b>{pos.get('name')} ({code})</b>
+📌 <b>현재 상태:</b> 보유 중 (진입가 대비 <code>{pct_chg:+.2f}%</code>)
+
+🔥 <b>[새로운 소식 및 뉴스]</b>
+{latest_news}
+
+📈 <b>[실시간 차트 바로가기]</b>
+• <a href="{naver_chart_url}">📲 네이버 증권 차트 보기</a>
+• <a href="{tv_chart_url}">📊 트레이딩뷰 차트 보기</a>
+━━━━━━━━━━━━━━━━━━━━━━━
+💡 <i>기존 손절가 및 목표가는 유지되며, 지속 모니터링 중입니다.</i>""")
 
             updated_positions.append(pos)
         except:
@@ -306,23 +396,21 @@ def main():
                     if extra_reason: reasons.append(extra_reason)
                     
                     comp_info = get_company_info(row)
-                    if comp_info:
-                        reasons.append(f"• 기업 정보: {comp_info}")
+                    if comp_info: reasons.append(f"• 기업 정보: {comp_info}")
                     
-                    news_info = get_stock_news(code)
-                    if news_info:
-                        reasons.append(f"• 최근 관련 뉴스/이슈:\n{news_info}")
+                    initial_news = get_stock_news(code)
+                    if initial_news: reasons.append(f"• 최근 관련 뉴스/이슈:\n{initial_news}")
 
                     reasons_text = "\n".join(reasons)
 
-                    # 💡 모바일 바로가기 차트 링크 생성
                     naver_chart_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
                     tv_chart_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
 
                     updated_positions.append({
                         "code": code, "name": name, "strategy": strategy_type,
                         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                        "highest_reached": "NONE", "time": ts()
+                        "highest_reached": "NONE", "time": ts(),
+                        "last_news": initial_news
                     })
                     active_codes.append(code)
 
