@@ -66,5 +66,6 @@
     "tp2_end": 0,
     "tp1_end": 0,
     "loss_end": 1
-  }
+  },
+  "last_bear_state": true
 }
