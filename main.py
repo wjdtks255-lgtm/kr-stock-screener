@@ -1,14 +1,14 @@
-# KOREA MULTI-STRATEGY HUNTER & STATS ENGINE V32.1
+# KOREA MULTI-STRATEGY HUNTER & STATS ENGINE V32.1.1
 import os, json, time, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "32.1.0"
+V = "32.1.1"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+CHAT = os.getenv("CHAT_ID", "")  # 깃허브 시크릿 CHAT_ID와 정확히 일치시킴
 KST = timezone(timedelta(hours=9))
 
 MAX_SLOTS = 8  # 슬롯 8개 설정
@@ -48,7 +48,7 @@ def load(p, d):
 
 def tg(x):
     if not TOKEN or not CHAT: 
-        print("[TG CONFIG ERROR] Token or Chat ID is missing.")
+        print(f"[TG CONFIG ERROR] Token or Chat ID is missing. (TOKEN: {'OK' if TOKEN else 'MISSING'}, CHAT_ID: {'OK' if CHAT else 'MISSING'})")
         return False
     try:
         r = requests.post(
@@ -63,7 +63,6 @@ def tg(x):
 
 def get_state():
     current_month = now().strftime("%Y-%m")
-    # 요구하신 최종 종료 기준 통계 구조 초기화
     default_stats = {
         "total_closed": 0,
         "tp3_end": 0,
@@ -177,10 +176,6 @@ def check_market_shield_and_report():
         return False
 
 def format_stats_report(stats_dict, title_prefix="누적"):
-    """
-    스크린샷에 요청하신 양식에 맞춰 통계 및 승률 출력
-    승률 = (TP1종료 + TP2종료 + TP3종료) / 총 종료 시그널[cite: 5, 6]
-    """
     total = stats_dict.get("total_closed", 0)
     tp3 = stats_dict.get("tp3_end", 0)
     tp2 = stats_dict.get("tp2_end", 0)
@@ -188,28 +183,23 @@ def format_stats_report(stats_dict, title_prefix="누적"):
     loss = stats_dict.get("loss_end", 0)
     draws = stats_dict.get("draws", 0)
     
-    # 승리 건수: TP1, TP2, TP3 최종 종료 건수의 합[cite: 5, 6]
     wins_count = tp1 + tp2 + tp3
     win_rate = (wins_count / total * 100) if total > 0 else 0.0
 
     return f"""📊 <b>[시그널 {title_prefix} 성과 통계]</b>
 ━━━━━━━━━━━━━━━━━━━━━━━
-• <b>총 종료 시그널:</b> <b>{total}건</b>[cite: 4]
-• 🎯 <b>TP3 종료:</b> {tp3}건[cite: 4]
-• 🎯 <b>TP2 종료:</b> {tp2}건[cite: 4]
-• 🎯 <b>TP1 종료:</b> {tp1}건[cite: 4]
-• 🛑 <b>손절 종료:</b> {loss}건[cite: 4]
+• <b>총 종료 시그널:</b> <b>{total}건</b>
+• 🎯 <b>TP3 종료:</b> {tp3}건
+• 🎯 <b>TP2 종료:</b> {tp2}건
+• 🎯 <b>TP1 종료:</b> {tp1}건
+• 🛑 <b>손절 종료:</b> {loss}건
 • ⏱ <b>타임스톱/무승부:</b> {draws}건
 
-🏆 <b>최종 승률: <span style="color: #00ff00;">{win_rate:.1f}%</span></b>[cite: 4, 5]
+🏆 <b>최종 승률: {win_rate:.1f}%</b>
 📈 승리 {wins_count}건 · 손절 {loss}건
 ━━━━━━━━━━━━━━━━━━━━━━━"""
 
 def update_stats_record(stats_dict, end_type):
-    """
-    최종 종료 유형에 따라 카운트 증가 (중복 계산 방지)[cite: 3, 6]
-    end_type: 'TP3', 'TP2', 'TP1', 'LOSS', 'DRAW'
-    """
     stats_dict["total_closed"] += 1
     if end_type == 'TP3':
         stats_dict["tp3_end"] += 1
@@ -255,7 +245,7 @@ def main():
             tp1 = pos.get("tp1", 0)
             tp2 = pos.get("tp2", 0)
             tp3 = pos.get("tp3", 0)
-            highest_reached = pos.get("highest_reached", "NONE") # 'TP1', 'TP2', 'TP3' 등 기록
+            highest_reached = pos.get("highest_reached", "NONE")
             
             entry_time_str = pos.get("time", ts())
             try:
@@ -263,7 +253,6 @@ def main():
             except:
                 days_elapsed = 0
 
-            # [3차 목표가 완수 - 최종 TP3 종료]
             if current_price >= tp3:
                 update_stats_record(total_stats, 'TP3')
                 update_stats_record(monthly_stats, 'TP3')
@@ -278,23 +267,18 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [2차 목표가 달성 체크]
             if current_price >= tp2 and highest_reached != 'TP3' and highest_reached != 'TP2':
                 pos["highest_reached"] = 'TP2'
-                pos["sl"] = tp1  # 손절가 1차 목표가로 상향
+                pos["sl"] = tp1
                 tg(f"""🎯 <b>[2차 목표가 도달]</b> - 손절가를 1차 목표가({m(tp1)})로 상향합니다. ({pos.get('name')})""")
-            # [1차 목표가 달성 체크]
             elif current_price >= tp1 and highest_reached not in ['TP3', 'TP2', 'TP1']:
                 pos["highest_reached"] = 'TP1'
-                pos["sl"] = entry  # 손절가 본전으로 상향
+                pos["sl"] = entry
                 tg(f"""🎯 <b>[1차 목표가 도달]</b> - 손절가를 본전({m(entry)})으로 상향합니다. ({pos.get('name')})""")
 
-            # [타임스톱 청산 (7일 경과)]
             if days_elapsed >= 7:
                 if highest_reached in ['TP1', 'TP2']:
-                    # TP까지 갔으나 TP3를 못 찍고 7일 지난 경우, 도달했던 최고 단계로 최종 종료 처리
-                    end_key = f"{highest_reached}" # 'TP1' 또는 'TP2'
-                    stat_key = 'TP1' if end_key == 'TP1' else 'TP2'
+                    stat_key = highest_reached
                     update_stats_record(total_stats, stat_key)
                     update_stats_record(monthly_stats, stat_key)
                     report_title = f"🏆 <b>[수익 확보({stat_key}) 타임스톱 최종 종료]</b> 🔥"
@@ -313,10 +297,8 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━━━━""")
                 continue
 
-            # [손절가(SL) 이탈 청산 - 최종 손절 종료]
             if current_price <= sl:
                 if highest_reached in ['TP1', 'TP2'] or sl >= entry:
-                    # 이미 TP1/TP2를 찍어 본전 이상으로 방어되던 중 손절(본전컷)된 경우
                     update_stats_record(total_stats, highest_reached if highest_reached in ['TP1', 'TP2'] else 'TP1')
                     update_stats_record(monthly_stats, highest_reached if highest_reached in ['TP1', 'TP2'] else 'TP1')
                     report_title = "🎯 <b>[수익 방어 후 최종 마감]</b> 🔥"
@@ -340,7 +322,6 @@ def main():
             print(f"[ERROR] 종목 {code} 체크 중 오류:", e)
             updated_positions.append(pos)
 
-    # 멀티 전략 신규 스캔 (하락장 시 차단, 슬롯 8개 기준)
     active_codes = [p.get("code") for p in updated_positions]
     
     if is_bear_market:
@@ -382,13 +363,10 @@ def main():
                     
                     strategy_type = None
                     
-                    # 1. 주도주 눌림목 전략
                     if close > ma20 and ma5 > ma20 and volume > vol_ma20:
                         strategy_type = "주도주 눌림목"
-                    # 2. 종가 베팅 전략
                     elif close > float(df['Open'].iloc[-1]) and close >= float(df['High'].iloc[-1]) * 0.98 and volume > vol_ma20 * 1.5:
                         strategy_type = "종가 베팅"
-                    # 3. 낙폭과대 반등 전략
                     else:
                         delta = df['Close'].diff()
                         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
