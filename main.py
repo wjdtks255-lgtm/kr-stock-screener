@@ -1,11 +1,11 @@
-# KOREA MULTI-STRATEGY PROFIT MAXIMIZER & LIVE MONITOR V32.1.8
+# KOREA MULTI-STRATEGY PROFIT MAXIMIZER & LIVE MONITOR V32.1.9
 import os, json, time, requests, re
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import FinanceDataReader as fdr
 
-V = "32.1.8"
+V = "32.1.9"
 STATE = "active_positions.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT = os.getenv("CHAT_ID", "")
@@ -43,14 +43,20 @@ def load(p, d):
     except: return d
 
 def tg(x):
-    if not TOKEN or not CHAT: return False
+    if not TOKEN or not CHAT: 
+        print("[ERROR] TELEGRAM_TOKEN 또는 CHAT_ID가 설정되지 않았습니다.")
+        return False
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT, "text": x, "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=15)
+        if not r.ok:
+            print(f"[ERROR] Telegram API 요청 실패: {r.text}")
         return r.ok
-    except: return False
+    except Exception as e:
+        print(f"[ERROR] Telegram 예외 발생: {e}")
+        return False
 
 def get_state():
     current_month = now().strftime("%Y-%m")
@@ -86,7 +92,7 @@ def is_market_open():
     n = now()
     if n.weekday() >= 5: return False
     cur = n.hour * 60 + n.minute
-    return (9 * 60) <= cur <= (15 * 60 + 30)
+    return (8 * 60 + 50) <= cur <= (15 * 60 + 40)
 
 def get_stock_news(code):
     try:
@@ -99,7 +105,8 @@ def get_stock_news(code):
             clean_t = re.sub(r'<[^>]+>', '', t).strip()
             if clean_t: clean_titles.append(f"• {clean_t}")
         return "\n".join(clean_titles) if clean_titles else None
-    except:
+    except Exception as e:
+        print(f"[WARN] 뉴스 데이터 크롤링 실패 [{code}]: {e}")
         return None
 
 def get_company_info(krx_row):
@@ -115,7 +122,6 @@ def get_company_info(krx_row):
 
 def check_market_shield_and_report(last_bear_state):
     is_bear_market = False
-    reasons = []
     try:
         kospi_df = fdr.DataReader('KS11', datetime.now() - timedelta(days=40))
         kosdaq_df = fdr.DataReader('KQ11', datetime.now() - timedelta(days=40))
@@ -128,31 +134,18 @@ def check_market_shield_and_report(last_bear_state):
         kosdaq_chg = ((kosdaq_close - kosdaq_prev) / kosdaq_prev) * 100
         kosdaq_ma20 = float(kosdaq_df['Close'].rolling(20).mean().iloc[-1])
 
-        if kospi_close < kospi_ma20: 
-            is_bear_market = True
-            reasons.append(f"코스피 지수({kospi_close:,.2f})가 20일 이평선 하회")
-        if kosdaq_close < kosdaq_ma20: 
-            is_bear_market = True
-            reasons.append(f"코스닥 지수({kosdaq_close:,.2f})가 20일 이평선 하회")
-        if kospi_chg <= -2.0 or kosdaq_chg <= -2.0: 
-            is_bear_market = True
-            reasons.append(f"시장 지수 급락 발생 (코스피: {kospi_chg:+.2f}%, 코스닥: {kosdaq_chg:+.2f}%)")
+        if kospi_close < kospi_ma20: is_bear_market = True
+        if kosdaq_close < kosdaq_ma20: is_bear_market = True
+        if kospi_chg <= -2.0 or kosdaq_chg <= -2.0: is_bear_market = True
 
         if last_bear_state != is_bear_market:
             if is_bear_market:
-                tg(f"""🛡 <b>[하락장 방어 모드 발동]</b> 🚨
-━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ <b>원금 보존을 위해 신규 매수를 전면 차단합니다.</b>
-• 코스피: <code>{kospi_close:,.2f}</code> ({kospi_chg:+.2f}%)
-• 코스닥: <code>{kosdaq_close:,.2f}</code> ({kosdaq_chg:+.2f}%)
-━━━━━━━━━━━━━━━━━━━━━━━""")
+                tg(f"🛡 <b>[하락장 방어 모드 발동]</b> 🚨\n• 코스피: <code>{kospi_close:,.2f}</code> ({kospi_chg:+.2f}%)\n• 코스닥: <code>{kosdaq_close:,.2f}</code> ({kosdaq_chg:+.2f}%)")
             else:
-                tg(f"""📊 <b>[수익 추구 장세 재개]</b> 📈
-━━━━━━━━━━━━━━━━━━━━━━━
-📈 <i>지수 안정세: 고수익 멀티 전략 스캐너가 가동됩니다.</i>
-━━━━━━━━━━━━━━━━━━━━━━━""")
+                tg("📊 <b>[수익 추구 장세 재개]</b> 📈\n지수 안정세: 고수익 멀티 전략 스캐너가 가동됩니다.")
         return is_bear_market
-    except:
+    except Exception as e:
+        print(f"[WARN] 지수 하락장 체크 실패: {e}")
         return False
 
 def format_stats_report(stats_dict):
@@ -181,7 +174,6 @@ def update_stats_record(stats_dict, end_type):
     elif end_type == 'LOSS': stats_dict["loss_end"] += 1
     elif end_type == 'DRAW': stats_dict["draws"] += 1
 
-# 💡 장 시작 전 / 마감 후 정기 포트폴리오 슬롯 현황 전송 함수
 def send_slot_status_report(positions, is_bear):
     bear_text = "하락장 방어 모드 유지 중" if is_bear else "정상 매매 모드 가동 중"
     used_slots = len(positions)
@@ -241,7 +233,7 @@ def main():
     state["last_bear_state"] = is_bear_market
     positions = state.get("positions", [])
 
-    # 💡 정기 알림 체크 (08:55 장 시작 전, 15:35 장 마감 후 슬롯 리포트 발송)
+    # 정기 알림 체크 (08:55 장 시작 전, 15:35 장 마감 후 슬롯 리포트 발송)
     n = now()
     cur_time_str = n.strftime("%H:%M")
     sent_reports = state.get("sent_reports", [])
@@ -252,10 +244,11 @@ def main():
         if report_key not in sent_reports:
             send_slot_status_report(positions, is_bear_market)
             sent_reports.append(report_key)
-            state["sent_reports"] = sent_reports[-10:] # 최근 10개만 유지
+            state["sent_reports"] = sent_reports[-10:]
 
     if not is_market_open(): 
         save(STATE, state)
+        print("[INFO] 장 운영 시간이 아닙니다. 종료합니다.")
         return
 
     updated_positions = []
@@ -265,6 +258,7 @@ def main():
         try:
             df = fdr.DataReader(code)
             if df.empty:
+                print(f"[WARN] 주가 데이터 조회 실패 ({code})")
                 updated_positions.append(pos)
                 continue
             
@@ -276,12 +270,14 @@ def main():
             try: days_elapsed = (now().date() - datetime.strptime(entry_time_str.split()[0], "%Y-%m-%d").date()).days
             except: days_elapsed = 0
 
+            # 3차 목표가 달성
             if current_price >= tp3:
                 update_stats_record(total_stats, 'TP3')
                 update_stats_record(monthly_stats, 'TP3')
                 tg(f"🏆 <b>[최종 TP3 수익 극대화 완료]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
                 continue
 
+            # 2차 및 1차 목표가 달성 스탑로스 상향
             if current_price >= tp2 and highest_reached not in ['TP3', 'TP2']:
                 pos["highest_reached"] = 'TP2'
                 pos["sl"] = tp1
@@ -291,6 +287,7 @@ def main():
                 pos["sl"] = entry
                 tg(f"🎯 <b>[1차 목표가 달성]</b> - 손절가를 본전({m(entry)})으로 올려 무위험 전환! ({pos.get('name')})")
 
+            # 7일 경과 청산
             if days_elapsed >= 7:
                 stat_key = highest_reached if highest_reached in ['TP1', 'TP2'] else 'DRAW'
                 update_stats_record(total_stats, stat_key)
@@ -298,6 +295,7 @@ def main():
                 tg(f"⏱ <b>[기간 달성 회전 청산]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
                 continue
 
+            # 손절가 이탈
             if current_price <= sl:
                 if highest_reached in ['TP1', 'TP2'] or sl >= entry:
                     update_stats_record(total_stats, highest_reached if highest_reached in ['TP1', 'TP2'] else 'TP1')
@@ -309,7 +307,7 @@ def main():
                     tg(f"🛑 <b>[최소 손절 마감]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
                 continue
 
-            # 💡 보유 종목 이슈/뉴스 업데이트 감시 (중복 방지)
+            # 보유 종목 뉴스 포착
             latest_news = get_stock_news(code)
             saved_news = pos.get("last_news", "")
             if latest_news and latest_news != saved_news:
@@ -329,15 +327,16 @@ def main():
 📈 <b>[실시간 차트 바로가기]</b>
 • <a href="{naver_chart_url}">📲 네이버 증권 차트 보기</a>
 • <a href="{tv_chart_url}">📊 트레이딩뷰 차트 보기</a>
-━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>기존 손절가 및 목표가는 유지되며, 지속 모니터링 중입니다.</i>""")
+━━━━━━━━━━━━━━━━━━━━━━━""")
 
             updated_positions.append(pos)
-        except:
+        except Exception as e:
+            print(f"[ERROR] 종목 포지션 처리 예외 ({code}): {e}")
             updated_positions.append(pos)
 
     active_codes = [p.get("code") for p in updated_positions]
     
+    # 신규 종목 스캔
     if not is_bear_market and len(updated_positions) < MAX_SLOTS:
         try:
             krx = fdr.StockListing('KRX')
@@ -432,10 +431,12 @@ def main():
 📈 <b>[실시간 차트 바로가기]</b>
 • <a href="{naver_chart_url}">📲 네이버 증권 차트 보기</a>
 • <a href="{tv_chart_url}">📊 트레이딩뷰 차트 보기</a>
-━━━━━━━━━━━━━━━━━━━━━━━
-💡 <i>전체 자금의 5~7% 이내로 분할 매수하고, 본 종목은 승률 70% 타겟 리스크 관리 모드가 적용됩니다.</i>""")
-                except: continue
-        except: pass
+━━━━━━━━━━━━━━━━━━━━━━━""")
+                except Exception as e:
+                    print(f"[WARN] 종목 분석 예외 발생 [{code}]: {e}")
+                    continue
+        except Exception as e:
+            print(f"[ERROR] 스캐너 실행 중 에러: {e}")
 
     state["positions"] = updated_positions
     state["total_stats"] = total_stats
