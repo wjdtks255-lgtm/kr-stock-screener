@@ -66,6 +66,15 @@ def load():
     s = {}
   s.setdefault("positions", {})
   s.setdefault("sent_today", {})
+  s.setdefault(
+      "total_stats",
+      {
+          "wins": 0,
+          "losses": 0,
+          "draws": 0,
+          "total_closed": 0,
+      },
+  )
   return s
 
 
@@ -294,10 +303,37 @@ def entry_msg(p):
 def close_signal(s, code, reason, price):
   p = s["positions"].pop(code)
   e = p["entry"]
+  net_pct = change(e, price)
+
+  stats = s.setdefault(
+      "total_stats", {"wins": 0, "losses": 0, "draws": 0, "total_closed": 0}
+  )
+  stats["total_closed"] += 1
+  if net_pct > 0:
+    stats["wins"] += 1
+  elif net_pct < 0:
+    stats["losses"] += 1
+  else:
+    stats["draws"] += 1
+
+  wins = stats["wins"]
+  losses = stats["losses"]
+  draws = stats["draws"]
+  total = stats["total_closed"]
+
+  # 무(draws)를 제외한 승률 계산: 승 / (승 + 패)
+  denom = wins + losses
+  win_rate = (wins / denom * 100) if denom > 0 else 0.0
+
   send(
       f"🏁 시그널 종료 | {p['name']} ({code})\n"
-      f"사유: {reason}\n확인가: {won(price)}\n"
-      f"진입 대비: {change(e, price):+.2f}%\n"
+      f"사유: {reason}\n"
+      f"확인가: {won(price)}\n"
+      f"진입 대비: {net_pct:+.2f}%\n"
+      f"━━━━━━━━━━━━━━\n"
+      f"📊 누적 성과: 총 {total}건 | 승 {wins} | 무 {draws} | 패"
+      f" {losses}\n"
+      f"누적 승률: <b>{win_rate:.1f}%</b> (승패 기준)\n"
       f"남은 슬롯: {MAX_POS-len(s['positions'])}/{MAX_POS}"
   )
 
