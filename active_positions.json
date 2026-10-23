@@ -23,17 +23,6 @@
       "time": "2026-10-20 13:02:10"
     },
     {
-      "code": "020150",
-      "name": "롯데에너지머티리얼즈",
-      "entry": 54500.0,
-      "sl": 52047.5,
-      "tp1": 58178.74999999999,
-      "tp2": 61366.99999999999,
-      "tp3": 64800.5,
-      "hit": [],
-      "time": "2026-10-21 14:51:26"
-    },
-    {
       "code": "111770",
       "name": "영원무역",
       "entry": 72900.0,
@@ -50,22 +39,22 @@
     "wins": 0,
     "draws": 0,
     "losses": 1,
-    "total_closed": 1,
+    "total_closed": 2,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 1
+    "loss_end": 2
   },
   "monthly_stats": {
     "month": "2026-10",
     "wins": 0,
     "draws": 0,
     "losses": 1,
-    "total_closed": 1,
+    "total_closed": 2,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 1
+    "loss_end": 2
   },
   "last_bear_state": true
 }
