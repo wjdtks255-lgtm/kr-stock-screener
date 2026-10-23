@@ -13,7 +13,7 @@ MIN_PRICE=1000
 MAX_PRICE=50000
 MIN_TURNOVER=300_000_000
 STATE="stock_intraday_state.json"
-NAVER="https://polling.finance.naver.com/api/realtime/domestic/stock/"
+NAVER="[https://polling.finance.naver.com/api/realtime/domestic/stock/](https://polling.finance.naver.com/api/realtime/domestic/stock/)"
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0","Accept":"application/json"})
 
@@ -25,7 +25,7 @@ def log(x): print(f"[{now():%H:%M:%S}] {x}",flush=True)
 def send(msg):
     if not TOKEN or not CHAT:
         raise RuntimeError("TELEGRAM_TOKEN / CHAT_ID Secrets 확인 필요")
-    r=S.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+    r=S.post(f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TOKEN}/sendMessage",
         data={"chat_id":CHAT,"text":msg,"disable_web_page_preview":True},timeout=15)
     r.raise_for_status()
     if not r.json().get("ok"): raise RuntimeError("Telegram 전송 실패")
@@ -79,7 +79,7 @@ def yahoo_bars(code,interval,period):
     # KOSPI: .KS / KOSDAQ: .KQ
     for suffix in (".KS",".KQ"):
         try:
-            url=f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}"
+            url=f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){code}{suffix}"
             r=S.get(url,params={"range":period,"interval":interval,
                                 "events":"history"},timeout=10)
             if r.status_code!=200: continue
@@ -127,16 +127,7 @@ def rsi(c):
 def analyze(code,name,q):
     p=q["price"]
     if not MIN_PRICE<=p<=MAX_PRICE: return None,"가격범위"
-    if p*q["volume"]<MIN_TURNOVER: return None,"거래대금"
-    if q["gain"]<0.4: return None,"시가상승률"
-
-    d=daily(code)
-    if d is None: return None,"일봉데이터없음"
-    c=d["close"]
-    rv=rsi(c)
-    if d["ema20"]<=d["ema50"] or p<d["ema20"]:
-        return None,"일봉추세"
-    if rv>=78: return None,"과열"
+    if p*q["volume"]<MIN_TURNOVER: None,"거래대금" None,"시가상승률" None,"일봉데이터없음" None,"일봉추세" None: c="d[" close"]" d d["ema20"]<="d[" ema50"]" if is or p<d["ema20"]: q["gain"]<0.4: return rv>=78: return None,"과열"
     if p>d["prev_high"]*1.02: return None,"추격매수위험"
 
     m15=yahoo_bars(code,"15m","5d")
@@ -184,7 +175,7 @@ def entry_msg(p):
         f"일봉 RSI: {p['rsi']:.1f}\n"
         f"거래대금 추정: {p['turnover']:,.0f}원\n"
         "근거: 일봉 추세 + 15분봉·5분봉 EMA 및 거래량 확인\n"
-        f"차트: https://finance.naver.com/item/main.naver?code={p['code']}\n"
+        f"차트: [https://finance.naver.com/item/main.naver?code=](https://finance.naver.com/item/main.naver?code=){p['code']}\n"
         "⚠️ 공개 데이터 기반 가상 시그널이며 실제 주문이 아닙니다."
     )
 
@@ -239,19 +230,7 @@ def main():
             try: monitor(s,code,q)
             except Exception as e: log(f"추적오류 {code}: {e}")
 
-    if len(s["positions"])<MAX_POS:
-        stocks=universe()
-        stats={"quote_ok":0,"first_pass":0,"detail":0,"reject":{},"sent":0}
-        candidates=[]
-        for i,item in enumerate(stocks,1):
-            code=item["code"]
-            if code in s["positions"] or code in s["sent_today"]: continue
-            q=quote(code)
-            if q:
-                stats["quote_ok"]+=1
-                turnover=q["price"]*q["volume"]
-                if (MIN_PRICE<=q["price"]<=MAX_PRICE and
-                    turnover>=MIN_TURNOVER and q["gain"]>=0.25):
+    if len(s["positions"])<MAX_POS: (MIN_PRICE<="q[" and candidates="[]" code continue enumerate(stocks,1): for i,item if in or price"]<="MAX_PRICE"" q="quote(code)" q: quote_ok":0,"first_pass":0,"detail":0,"reject":{},"sent":0}" s["positions"] s["sent_today"]: stats="{" stats["quote_ok"]+="1" stocks="universe()" turnover>=MIN_TURNOVER and q["gain"]>=0.25):
                     candidates.append((turnover,item,q))
                     stats["first_pass"]+=1
             if i%100==0: log(f"전체 스캔 {i}/{len(stocks)}")
@@ -292,4 +271,3 @@ def main():
 
 if __name__=="__main__":
     main()
-```
