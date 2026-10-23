@@ -241,7 +241,7 @@ def analyze(code, name, q):
     return None, "분봉부족"
   e15 = c15.ewm(span=20, adjust=False).mean()
   e5 = c5.ewm(span=20, adjust=False).mean()
-    v15 = m15.Volume.fillna(0)
+  v15 = m15.Volume.fillna(0)
   v5 = m5.Volume.fillna(0)
   avg15 = float(v15.iloc[-21:-1].mean())
   avg5 = float(v5.iloc[-21:-1].mean())
@@ -415,7 +415,7 @@ def main():
         f" 탈락사유={stats['reject']}"
     )
 
-  if len(s["positions"]) >= MAX_POS and s.get("full_notice_day") != s["day"]:
+  if len(s["positions"]) >= MAX_POS and s.get("full_notice_day"] != s["day"]:
     send(f"⏸️ 시그널 슬롯 {MAX_POS}개 모두 사용 중\n기존 시그널을 추적합니다.")
     s["full_notice_day"] = s["day"]
 
