@@ -21,7 +21,8 @@ import requests
 # ----------------------------- Configuration -----------------------------
 VERSION = "33.1.0"
 KST = timezone(timedelta(hours=9))
-STATE_FILE = Path(os.getenv("STOCK_SIGNAL_STATE", "stock_signal_state.json"))
+# 🌟 기존 레포지토리의 active_positions.json 파일명과 연동되도록 설정
+STATE_FILE = Path(os.getenv("STOCK_SIGNAL_STATE", "active_positions.json"))
 TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
 
@@ -29,12 +30,8 @@ MAX_POSITIONS = int(os.getenv("STOCK_MAX_POSITIONS", "8"))
 MAX_SCAN = int(os.getenv("STOCK_MAX_SCAN", "150"))
 MIN_DAILY_TURNOVER_KRW = float(os.getenv("STOCK_MIN_TURNOVER_KRW", "5000000000"))
 MAX_HOLDING_SESSIONS = int(os.getenv("STOCK_MAX_HOLDING_SESSIONS", "20"))
-# Set to a broker/tax-specific round-trip cost estimate. Default 0 means
-# reported performance is explicitly gross and excludes all costs.
 ROUND_TRIP_COST_PCT = float(os.getenv("STOCK_ROUND_TRIP_COST_PCT", "0"))
 
-# Signal uses a completed daily candle only. The script is intended to run
-# after the Korean cash market close; before 16:10 KST today's candle is dropped.
 SIGNAL_AFTER_HOUR = 16
 SIGNAL_AFTER_MINUTE = 10
 
@@ -76,13 +73,22 @@ def load_state():
         with STATE_FILE.open("r", encoding="utf-8") as f:
             state = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        # Do not silently erase historical performance or active positions.
         raise RuntimeError(f"상태 파일을 읽을 수 없습니다: {STATE_FILE}: {exc}") from exc
     if not isinstance(state, dict):
         raise RuntimeError("상태 파일 형식이 올바르지 않습니다.")
     defaults = default_state()
     for key, value in defaults.items():
         state.setdefault(key, value)
+        
+    # 🌟 기존 리스트 형태의 positions를 딕셔너리로 자동 변환하는 호환 패치
+    if isinstance(state["positions"], list):
+        converted = {}
+        for p in state["positions"]:
+            code = p.get("code")
+            if code:
+                converted[code] = p
+        state["positions"] = converted
+
     if not isinstance(state["positions"], dict):
         raise RuntimeError("상태 파일의 positions 형식이 올바르지 않습니다.")
     if not isinstance(state["history"], list):
@@ -149,7 +155,6 @@ def normalize_ohlcv(raw):
     df = df[required].apply(pd.to_numeric, errors="coerce").dropna()
     if df.empty:
         return df
-    # Normalize dates to naive local dates for consistent daily-bar comparisons.
     dates = pd.to_datetime(df.index, errors="coerce")
     try:
         if getattr(dates, "tz", None) is not None:
@@ -169,8 +174,6 @@ def get_daily_bars(symbol, calendar_days=260):
         return df
     today = now().date()
     after_close = (now().hour, now().minute) >= (SIGNAL_AFTER_HOUR, SIGNAL_AFTER_MINUTE)
-    # During the session and shortly after close, today's daily bar may still
-    # be incomplete/unstable. Never use it for a new signal or exit decision.
     if not after_close and df.index[-1].date() == today:
         df = df.iloc[:-1]
     return df
@@ -212,7 +215,6 @@ def add_indicators(df):
 
 
 def market_regime():
-    """Return market context or raise; missing index data blocks new entries."""
     results = {}
     for label, code in (("KOSPI", "KS11"), ("KOSDAQ", "KQ11")):
         df = get_daily_bars(code, calendar_days=90)
@@ -232,8 +234,6 @@ def market_regime():
             "change_pct": float(change_pct),
             "below_ma20": bool(close.iloc[-1] < ma20),
         }
-    # Conservative regime filter: pause if both indices are below MA20, or
-    # either index suffers a 2%+ daily decline. Data failure is not neutral.
     bear = (
         (results["KOSPI"]["below_ma20"] and results["KOSDAQ"]["below_ma20"])
         or results["KOSPI"]["change_pct"] <= -2.0
@@ -248,7 +248,6 @@ def list_candidates():
         raise RuntimeError("KRX 종목 목록을 읽지 못했습니다.")
     listing = listing.dropna(subset=["Code", "Name"]).copy()
     listing["Code"] = listing["Code"].astype(str).str.zfill(6)
-    # Use a stated, stable selection basis rather than relying on provider row order.
     if "Marcap" in listing.columns:
         listing["_rank"] = pd.to_numeric(listing["Marcap"], errors="coerce").fillna(0)
         listing = listing.sort_values("_rank", ascending=False)
@@ -258,13 +257,11 @@ def list_candidates():
     else:
         listing = listing.sort_values("Code")
         log.warning("시가총액 열이 없어 종목코드 순서로 스캔합니다.")
-    # Exclude preferred shares and obvious non-common share codes where possible.
     listing = listing[~listing["Code"].str.endswith("5")]
     return listing.head(MAX_SCAN)
 
 
 def make_signal(df):
-    """Return an objective daily-chart setup or None."""
     if len(df) < 60:
         return None
     data = add_indicators(df)
@@ -293,13 +290,10 @@ def make_signal(df):
     if not trend_ok or not rsi_ok or not strong_close:
         return None
 
-    # Pullback: at least one of the prior five sessions tested the 20-day EMA
-    # area, and the latest completed candle closes above the previous high.
     recent = data.iloc[-6:-1]
     recent_touch = bool((recent["low"] <= recent["ema20"] + 0.5 * recent["atr14"]).any())
     pullback = recent_touch and close > float(prev["high"]) and volume_ratio >= 0.8
 
-    # Breakout: close above the previous 20-session high with volume expansion.
     breakout = close > float(row["prior20_high"]) and volume_ratio >= 1.5
     if not (pullback or breakout):
         return None
@@ -418,20 +412,14 @@ def monitor_positions(state):
                 low = float(bar["low"])
                 close = float(bar["close"])
 
-                # Gap-through-stop: use the open, not the requested stop, as a
-                # more realistic adverse reference. Intraday paths are unknown.
                 if open_price <= stop:
                     close_position(state, code, position, open_price, date_text, "시가 갭 하락으로 스탑 하회")
                     break
-                # Conservative OHLC convention: if the day's low touches the
-                # active stop, process the stop before any target in that bar.
                 if low <= stop:
                     reason = "초기 손절" if position.get("highest_tp", 0) == 0 else "상향 스탑 종료"
                     close_position(state, code, position, stop, date_text, reason)
                     break
 
-                # TP3 is a full virtual exit; bar-path ambiguities are treated
-                # conservatively by the active-stop checks above.
                 if high >= float(position["tp3"]):
                     close_position(state, code, position, float(position["tp3"]), date_text, "TP3 도달")
                     break
@@ -445,7 +433,6 @@ def monitor_positions(state):
                 old_level = int(position.get("highest_tp", 0))
                 if reached > old_level:
                     position["highest_tp"] = reached
-                    # Virtual trailing rule: TP1 -> entry stop; TP2 -> TP1 stop.
                     position["sl"] = float(position["entry_ref"] if reached == 1 else position["tp1"])
                     position["last_processed_date"] = date_text
                     notice = (
@@ -455,8 +442,6 @@ def monitor_positions(state):
                     )
                     if not send_telegram(notice):
                         log.error("TP 알림 미전송: %s TP%s", code, reached)
-                    # If the bar also retraced through the newly raised stop,
-                    # assume the target was reached first and stop second.
                     if low <= float(position["sl"]):
                         reason = "TP1 후 본전 스탑" if reached == 1 else "TP2 후 TP1 스탑"
                         close_position(state, code, position, float(position["sl"]), date_text, reason)
@@ -535,8 +520,6 @@ def scan_new_signals(state, regime):
             if signal["date"] != today:
                 log.info("오늘 확정된 신호봉이 아니므로 제외: %s (%s)", code, signal["date"])
                 continue
-            # The signal reference is the completed candle close. It is not
-            # represented as a guaranteed next-session fill.
             position = {
                 "code": code,
                 "name": name,
@@ -589,7 +572,6 @@ def main():
     try:
         regime = market_regime()
     except Exception:
-        # Fail closed: unknown market state is not treated as a bullish/neutral regime.
         log.exception("시장 데이터 확인 실패: 신규 신호를 만들지 않습니다.")
         return
 
