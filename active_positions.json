@@ -1,60 +1,26 @@
 {
-  "positions": [
-    {
-      "code": "068270",
-      "name": "셀트리온",
-      "entry": 196500.0,
-      "sl": 190460.7142857143,
-      "tp1": 205558.92857142858,
-      "tp2": 213410.0,
-      "tp3": 221865.0,
-      "hit": [],
-      "time": "2026-10-20 13:00:56"
-    },
-    {
-      "code": "000100",
-      "name": "유한양행",
-      "entry": 85700.0,
-      "sl": 82157.14285714286,
-      "tp1": 91014.28571428571,
-      "tp2": 95620.0,
-      "tp3": 100580.0,
-      "hit": [],
-      "time": "2026-10-20 13:02:10"
-    },
-    {
-      "code": "111770",
-      "name": "영원무역",
-      "entry": 72900.0,
-      "sl": 69978.57142857143,
-      "tp1": 77282.14285714286,
-      "tp2": 81080.0,
-      "tp3": 85170.0,
-      "hit": [],
-      "time": "2026-10-21 15:03:36"
-    }
-  ],
+  "positions": {},
   "sent": [],
   "total_stats": {
     "wins": 0,
     "draws": 0,
-    "losses": 1,
-    "total_closed": 2,
+    "losses": 0,
+    "total_closed": 0,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 2
+    "loss_end": 0
   },
   "monthly_stats": {
     "month": "2026-10",
     "wins": 0,
     "draws": 0,
-    "losses": 1,
-    "total_closed": 2,
+    "losses": 0,
+    "total_closed": 0,
     "tp3_end": 0,
     "tp2_end": 0,
     "tp1_end": 0,
-    "loss_end": 2
+    "loss_end": 0
   },
-  "last_bear_state": true
+  "last_bear_state": false
 }
