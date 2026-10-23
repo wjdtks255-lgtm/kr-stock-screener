@@ -1,4 +1,3 @@
-```yaml
 name: Public Stock Signal Bot
 
 on:
@@ -68,7 +67,16 @@ jobs:
             else
               echo "State unchanged."
             fi
+          elif [ -f active_positions.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add active_positions.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update stock signal state [skip ci]"
+              git push
+            else
+              echo "State unchanged."
+            fi
           else
             echo "State file not created; nothing to save."
           fi
-```
