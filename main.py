@@ -415,7 +415,7 @@ def main():
         f" 탈락사유={stats['reject']}"
     )
 
-  if len(s["positions"]) >= MAX_POS and s.get("full_notice_day"] != s["day"]:
+  if len(s["positions"]) >= MAX_POS and s.get("full_notice_day") != s["day"]:
     send(f"⏸️ 시그널 슬롯 {MAX_POS}개 모두 사용 중\n기존 시그널을 추적합니다.")
     s["full_notice_day"] = s["day"]
 
