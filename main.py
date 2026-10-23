@@ -1,4 +1,4 @@
-
+```python
 import os,json,time,requests
 from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
@@ -8,155 +8,183 @@ import FinanceDataReader as fdr
 TZ=ZoneInfo("Asia/Seoul")
 TOKEN=os.getenv("TELEGRAM_TOKEN","").strip()
 CHAT=(os.getenv("CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-MAX_POS=min(8,max(1,int(os.getenv("STOCK_MAX_POSITIONS","8"))))
-MAX_SCAN=min(40,max(1,int(os.getenv("KIS_MAX_SYMBOLS","40"))))
-MIN_PRICE=int(os.getenv("STOCK_MIN_PRICE_KRW","1000"))
-MAX_PRICE=int(os.getenv("STOCK_MAX_PRICE_KRW","50000"))
-MIN_GAIN=float(os.getenv("STOCK_MIN_OPEN_GAIN_PCT","0.40"))
-MIN_VOL=float(os.getenv("STOCK_MIN_VOLUME_SURGE","1.50"))
+MAX_POS=8
+MAX_DETAIL=160
+MIN_PRICE=1000
+MAX_PRICE=50000
+MIN_TURNOVER=300_000_000
 STATE="stock_intraday_state.json"
 NAVER="https://polling.finance.naver.com/api/realtime/domestic/stock/"
+S=requests.Session()
+S.headers.update({"User-Agent":"Mozilla/5.0","Accept":"application/json"})
 
-def now():
-    return datetime.now(TZ)
+def now(): return datetime.now(TZ)
+def won(x): return f"{x:,.0f}원"
+def change(a,b): return (b/a-1)*100 if a else 0
+def log(x): print(f"[{now():%H:%M:%S}] {x}",flush=True)
 
-def send(text):
+def send(msg):
     if not TOKEN or not CHAT:
-        raise RuntimeError("TELEGRAM_TOKEN과 CHAT_ID Secrets를 확인하세요.")
-    r=requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id":CHAT,"text":text,"disable_web_page_preview":True},
-        timeout=15)
+        raise RuntimeError("TELEGRAM_TOKEN / CHAT_ID Secrets 확인 필요")
+    r=S.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={"chat_id":CHAT,"text":msg,"disable_web_page_preview":True},timeout=15)
     r.raise_for_status()
-    if not r.json().get("ok"):
-        raise RuntimeError("Telegram API 전송 실패")
+    if not r.json().get("ok"): raise RuntimeError("Telegram 전송 실패")
 
-def number(v):
+def load():
     try:
-        return float(str(v).replace(",","").replace("+","").strip())
-    except (TypeError,ValueError):
-        return 0.0
+        with open(STATE,encoding="utf-8") as f: s=json.load(f)
+    except (OSError,ValueError): s={}
+    s.setdefault("positions",{})
+    s.setdefault("sent_today",{})
+    return s
 
-def load_state():
-    try:
-        with open(STATE,encoding="utf-8") as f:
-            s=json.load(f)
-        s.setdefault("positions",{})
-        s.setdefault("sent_today",{})
-        return s
-    except (OSError,ValueError):
-        return {"positions":{},"sent_today":{}}
-
-def save_state(s):
-    with open(STATE,"w",encoding="utf-8") as f:
+def save(s):
+    with open(STATE+".tmp","w",encoding="utf-8") as f:
         json.dump(s,f,ensure_ascii=False,indent=2)
+    os.replace(STATE+".tmp",STATE)
 
-def get_quote(code):
-    r=requests.get(
-        NAVER+code,
-        headers={"User-Agent":"Mozilla/5.0"},
-        timeout=12)
-    r.raise_for_status()
-    data=r.json().get("datas",[])
-    if not data:
+def quote(code):
+    try:
+        r=S.get(NAVER+code,timeout=8)
+        r.raise_for_status()
+        rows=r.json().get("datas",[])
+        if not rows: return None
+        x=rows[0]
+        def n(k):
+            return float(str(x.get(k,"0")).replace(",","").replace("+",""))
+        p,op,vol=n("closePrice"),n("openPrice"),n("accumulatedTradingVolume")
+        if p<=0 or op<=0: return None
+        return {"price":p,"open":op,"volume":vol,
+                "gain":change(op,p),"name":x.get("stockName",code)}
+    except Exception as e:
+        log(f"시세오류 {code}: {type(e).__name__}")
         return None
-    x=data[0]
-    price=number(x.get("closePrice"))
-    op=number(x.get("openPrice"))
-    volume=number(x.get("accumulatedTradingVolume"))
-    if price<=0 or op<=0:
-        return None
-    return {
-        "price":price,"open":op,"volume":volume,
-        "gain":(price/op-1)*100,
-        "name":x.get("stockName",code)
-    }
 
-def get_universe():
+def universe():
     df=fdr.StockListing("KRX")
-    code_col=next((c for c in ("Code","Symbol") if c in df.columns),None)
-    name_col=next((c for c in ("Name",) if c in df.columns),None)
-    if not code_col or not name_col:
-        raise RuntimeError("KRX 종목 목록 형식을 확인하세요.")
-    df["code"]=df[code_col].astype(str).str.zfill(6)
-    df["name"]=df[name_col].astype(str)
-    df=df[df["code"].str.fullmatch(r"\d{6}")]
-    df=df[~df["name"].str.contains(
-        "ETF|ETN|스팩|리츠|인버스|레버리지",
+    cc=next((x for x in ("Code","Symbol") if x in df.columns),None)
+    nc="Name" if "Name" in df.columns else None
+    if not cc or not nc: raise RuntimeError("KRX 종목 목록 형식 오류")
+    df["code"]=df[cc].astype(str).str.extract(r"(\d{1,6})",expand=False).fillna("").str.zfill(6)
+    df["name"]=df[nc].astype(str)
+    df=df[df.code.str.fullmatch(r"\d{6}")]
+    df=df[~df.name.str.contains(
+        r"ETF|ETN|스팩|리츠|인버스|레버리지|선물",
         case=False,na=False)]
-    rank=next((c for c in ("Marcap","Amount","MarketCap") if c in df.columns),None)
-    if rank:
-        df["_rank"]=pd.to_numeric(df[rank],errors="coerce").fillna(0)
-        df=df.sort_values("_rank",ascending=False)
-    return df.head(MAX_SCAN)[["code","name"]].to_dict("records")
+    df=df.drop_duplicates("code")
+    log(f"전체 종목 목록: {len(df)}개")
+    return df[["code","name"]].to_dict("records")
 
-def get_history(code):
-    start=(now().date()-timedelta(days=100)).isoformat()
-    df=fdr.DataReader(code,start)
-    if df is None or len(df)<25:
-        return None
-    close=pd.to_numeric(df["Close"],errors="coerce").dropna()
-    volume=pd.to_numeric(df["Volume"],errors="coerce").fillna(0)
-    if len(close)<25:
-        return None
-    ema5=float(close.ewm(span=5,adjust=False).mean().iloc[-1])
-    ema20=float(close.ewm(span=20,adjust=False).mean().iloc[-1])
-    avgvol=float(volume.tail(20).mean())
-    return {"ema5":ema5,"ema20":ema20,"avgvol":avgvol}
+def yahoo_bars(code,interval,period):
+    # KOSPI: .KS / KOSDAQ: .KQ
+    for suffix in (".KS",".KQ"):
+        try:
+            url=f"https://query1.finance.yahoo.com/v8/finance/chart/{code}{suffix}"
+            r=S.get(url,params={"range":period,"interval":interval,
+                                "events":"history"},timeout=10)
+            if r.status_code!=200: continue
+            j=r.json()["chart"]
+            if j.get("error") or not j.get("result"): continue
+            z=j["result"][0]
+            q=z["indicators"]["quote"][0]
+            df=pd.DataFrame({
+                "Open":q.get("open",[]),"High":q.get("high",[]),
+                "Low":q.get("low",[]),"Close":q.get("close",[]),
+                "Volume":q.get("volume",[])
+            },index=pd.to_datetime(z["timestamp"],unit="s",utc=True).tz_convert(TZ))
+            df=df.dropna(subset=["Close"])
+            if len(df)>=25: return df
+        except Exception:
+            continue
+    return None
 
-def create_signal(code,name,q,h):
-    price=q["price"]
-    if not MIN_PRICE<=price<=MAX_PRICE:
-        return None
-    if q["gain"]<MIN_GAIN:
-        return None
-    if h["ema5"]<=h["ema20"] or price<=h["ema5"]:
-        return None
-    if h["avgvol"]<=0:
+def daily(code):
+    try:
+        df=fdr.DataReader(code,(now().date()-timedelta(days=150)).isoformat())
+        if df is None or len(df)<50: return None
+        c=pd.to_numeric(df.Close,errors="coerce").dropna()
+        if len(c)<50: return None
+        ema20=c.ewm(span=20,adjust=False).mean()
+        ema50=c.ewm(span=50,adjust=False).mean()
+        h=pd.to_numeric(df.High,errors="coerce")
+        l=pd.to_numeric(df.Low,errors="coerce")
+        prev=pd.to_numeric(df.Close,errors="coerce").shift()
+        tr=pd.concat([h-l,(h-prev).abs(),(l-prev).abs()],axis=1).max(axis=1)
+        atr=float(tr.rolling(14).mean().iloc[-1])
+        return {"df":df,"close":c,"ema20":float(ema20.iloc[-1]),
+                "ema50":float(ema50.iloc[-1]),
+                "prev_high":float(h.tail(20).iloc[:-1].max()),"atr":atr}
+    except Exception as e:
+        log(f"일봉오류 {code}: {type(e).__name__}")
         return None
 
-    minute=now().hour*60+now().minute
-    elapsed=max(0.05,min(1.0,(minute-540)/390))
-    expected=max(1.0,h["avgvol"]*elapsed)
-    ratio=q["volume"]/expected
-    if ratio<MIN_VOL:
-        return None
+def rsi(c):
+    d=c.diff()
+    up=d.clip(lower=0).ewm(alpha=1/14,adjust=False).mean()
+    dn=(-d.clip(upper=0)).ewm(alpha=1/14,adjust=False).mean()
+    return float((100-100/(1+up/dn.replace(0,float("nan")))).iloc[-1])
 
-    entry=price
+def analyze(code,name,q):
+    p=q["price"]
+    if not MIN_PRICE<=p<=MAX_PRICE: return None,"가격범위"
+    if p*q["volume"]<MIN_TURNOVER: return None,"거래대금"
+    if q["gain"]<0.4: return None,"시가상승률"
+
+    d=daily(code)
+    if d is None: return None,"일봉데이터없음"
+    c=d["close"]
+    rv=rsi(c)
+    if d["ema20"]<=d["ema50"] or p<d["ema20"]:
+        return None,"일봉추세"
+    if rv>=78: return None,"과열"
+    if p>d["prev_high"]*1.02: return None,"추격매수위험"
+
+    m15=yahoo_bars(code,"15m","5d")
+    m5=yahoo_bars(code,"5m","5d")
+    if m15 is None or m5 is None:
+        return None,"분봉데이터없음"
+
+    # 최근 완성된 봉을 우선 사용
+    c15=m15.Close
+    c5=m5.Close
+    if len(c15)<25 or len(c5)<25: return None,"분봉부족"
+    e15=c15.ewm(span=20,adjust=False).mean()
+    e5=c5.ewm(span=20,adjust=False).mean()
+    v15=m15.Volume.fillna(0)
+    v5=m5.Volume.fillna(0)
+    avg15=float(v15.iloc[-21:-1].mean())
+    avg5=float(v5.iloc[-21:-1].mean())
+    if avg15<=0 or avg5<=0: return None,"분봉거래량"
+    if c15.iloc[-1]<=e15.iloc[-1] or c5.iloc[-1]<=e5.iloc[-1]:
+        return None,"단기추세"
+    if v15.iloc[-1]<avg15*1.2 or v5.iloc[-1]<avg5*1.2:
+        return None,"분봉거래량증가부족"
+
+    risk=max(p*0.012,min(p*0.03,d["atr"]*0.7))
     return {
-        "code":code,"name":name,"entry":entry,
-        "tp1":entry*1.01,"tp2":entry*1.02,
-        "tp3":entry*1.03,"sl":entry*0.988,
-        "initial_sl":entry*0.988,
+        "code":code,"name":name,"entry":p,
+        "tp1":p+risk,"tp2":p+2*risk,"tp3":p+3*risk,
+        "sl":p-risk,"initial_sl":p-risk,"risk":risk,
         "tp1_done":False,"tp2_done":False,
-        "created":now().isoformat(),
-        "volume_ratio":ratio
-    }
+        "created":now().isoformat(),"rsi":rv,
+        "gain":q["gain"],"turnover":p*q["volume"]
+    },"통과"
 
-def won(v):
-    return f"{v:,.0f}원"
-
-def change(entry,price):
-    return (price/entry-1)*100
-
-def send_entry(p,slot):
+def entry_msg(p):
     e=p["entry"]
-    send(
-        "🚨 국내 주식 신규 시그널\n"
-        "━━━━━━━━━━━━━━\n"
+    return (
+        f"🚨 국내 주식 상승 시그널\n━━━━━━━━━━━━━━\n"
         f"종목: {p['name']} ({p['code']})\n"
-        f"가상 슬롯: {slot}/{MAX_POS}\n"
-        f"진입가: {won(e)} (0.00%)\n"
-        f"TP1: {won(p['tp1'])} (+{change(e,p['tp1']):.2f}%)\n"
-        f"TP2: {won(p['tp2'])} (+{change(e,p['tp2']):.2f}%)\n"
-        f"TP3: {won(p['tp3'])} (+{change(e,p['tp3']):.2f}%)\n"
-        f"손절: {won(p['initial_sl'])} ({change(e,p['initial_sl']):.2f}%)\n"
-        "━━━━━━━━━━━━━━\n"
-        "📊 시그널 근거\n"
-        "• 시가 대비 상승률 조건 충족\n"
-        "• 일봉 EMA5 > EMA20\n"
-        "• 현재가가 EMA5 상단\n"
-        f"• 시간 보정 거래량 비율: {p['volume_ratio']:.2f}배\n"
+        f"관찰 진입가: {won(e)}\n"
+        f"TP1: {won(p['tp1'])} ({change(e,p['tp1']):+.2f}%)\n"
+        f"TP2: {won(p['tp2'])} ({change(e,p['tp2']):+.2f}%)\n"
+        f"TP3: {won(p['tp3'])} ({change(e,p['tp3']):+.2f}%)\n"
+        f"손절: {won(p['initial_sl'])} ({change(e,p['initial_sl']):+.2f}%)\n"
+        f"시가 대비 상승: {p['gain']:.2f}%\n"
+        f"일봉 RSI: {p['rsi']:.1f}\n"
+        f"거래대금 추정: {p['turnover']:,.0f}원\n"
+        "근거: 일봉 추세 + 15분봉·5분봉 EMA 및 거래량 확인\n"
         f"차트: https://finance.naver.com/item/main.naver?code={p['code']}\n"
         "⚠️ 공개 데이터 기반 가상 시그널이며 실제 주문이 아닙니다."
     )
@@ -164,122 +192,105 @@ def send_entry(p,slot):
 def close_signal(s,code,reason,price):
     p=s["positions"].pop(code)
     e=p["entry"]
-    send(
-        f"🏁 시그널 종료 | {p['name']} ({code})\n"
-        f"종료 사유: {reason}\n"
-        f"확인 가격: {won(price)}\n"
-        f"진입 대비 변화: {change(e,price):+.2f}%\n"
-        f"남은 슬롯: {MAX_POS-len(s['positions'])}/{MAX_POS}\n"
-        "※ 실제 체결 수익이 아닌 조회 가격 기준입니다."
-    )
-    send("🔓 슬롯 해제: 신규 종목 검색을 재개합니다.")
+    send(f"🏁 시그널 종료 | {p['name']} ({code})\n"
+         f"사유: {reason}\n확인가: {won(price)}\n"
+         f"진입 대비: {change(e,price):+.2f}%\n"
+         f"남은 슬롯: {MAX_POS-len(s['positions'])}/{MAX_POS}")
 
 def monitor(s,code,q):
     p=s["positions"].get(code)
-    if not p:
-        return
+    if not p: return
     price=q["price"]
-    e=p["entry"]
-
-    # TP3가 한 번의 조회에서 확인된 경우 중간 목표도 기록
-    if price>=p["tp3"]:
-        if not p["tp1_done"]:
-            p["tp1_done"]=True
-            send(f"🎯 TP1 도달 확인 | {p['name']} ({code})\n가격: {won(price)}")
-        if not p["tp2_done"]:
-            p["tp2_done"]=True
-            send(f"🎯 TP2 도달 확인 | {p['name']} ({code})\n가격: {won(price)}")
-        close_signal(s,code,"TP3 최종 목표 도달",price)
-        return
-
     if price<=p["sl"]:
-        close_signal(s,code,"손절 또는 가상 추적 손절 도달",price)
-        return
-
+        close_signal(s,code,"손절/가상 추적 손절",price); return
+    if price>=p["tp3"]:
+        for key,label in (("tp1_done","TP1"),("tp2_done","TP2")):
+            if not p[key]:
+                p[key]=True
+                send(f"🎯 {label} 도달 확인 | {p['name']} ({code})")
+        close_signal(s,code,"TP3 최종 목표",price); return
     if price>=p["tp2"] and not p["tp2_done"]:
-        p["tp2_done"]=True
-        p["sl"]=p["tp1"]
-        send(
-            f"🎯 TP2 도달 | {p['name']} ({code})\n"
-            f"현재가: {won(price)}\n"
-            f"가상 손절선을 TP1로 상향: {won(p['sl'])}\n"
-            f"진입 대비: {change(e,price):+.2f}%"
-        )
-
-    if price>=p["tp1"] and not p["tp1_done"]:
-        p["tp1_done"]=True
-        p["sl"]=e
-        send(
-            f"🎯 TP1 도달 | {p['name']} ({code})\n"
-            f"현재가: {won(price)}\n"
-            f"가상 손절선을 진입가로 상향: {won(e)}\n"
-            f"진입 대비: {change(e,price):+.2f}%"
-        )
+        p["tp2_done"]=True; p["sl"]=p["tp1"]
+        send(f"🎯 TP2 도달 | {p['name']} ({code})\n"
+             f"현재가: {won(price)}\n가상 손절선: {won(p['sl'])}")
+    elif price>=p["tp1"] and not p["tp1_done"]:
+        p["tp1_done"]=True; p["sl"]=p["entry"]
+        send(f"🎯 TP1 도달 | {p['name']} ({code})\n"
+             f"현재가: {won(price)}\n가상 손절선: {won(p['sl'])}")
 
 def main():
     if not TOKEN or not CHAT:
-        raise RuntimeError("TELEGRAM_TOKEN과 CHAT_ID Secrets를 설정하세요.")
-
+        raise RuntimeError("TELEGRAM_TOKEN / CHAT_ID Secrets 확인 필요")
     t=now()
-    print("KST:",t.isoformat())
-    if t.weekday()>=5 or not (9*60<=t.hour*60+t.minute<=15*60+30):
-        print("정규장 시간 외: 스캔하지 않습니다.")
+    log(f"KST: {t.isoformat()}")
+    if t.weekday()>=5 or not (540<=t.hour*60+t.minute<=930):
+        log("장 운영시간 외")
         return
 
-    s=load_state()
-    today=t.date().isoformat()
-    if s.get("day")!=today:
-        s["day"]=today
+    s=load()
+    if s.get("day")!=t.date().isoformat():
+        s["day"]=t.date().isoformat()
         s["sent_today"]={}
         s["full_notice_day"]=""
 
-    universe=get_universe()
-    names={x["code"]:x["name"] for x in universe}
-    for code,p in s["positions"].items():
-        names[code]=p["name"]
+    # 기존 시그널 우선 추적
+    for code in list(s["positions"]):
+        q=quote(code)
+        if q:
+            try: monitor(s,code,q)
+            except Exception as e: log(f"추적오류 {code}: {e}")
 
-    # 기존 포지션을 먼저 확인해 신규 검색보다 우선 추적
-    codes=list(s["positions"].keys())
-    codes += [c for c in names if c not in s["positions"]]
+    if len(s["positions"])<MAX_POS:
+        stocks=universe()
+        stats={"quote_ok":0,"first_pass":0,"detail":0,"reject":{},"sent":0}
+        candidates=[]
+        for i,item in enumerate(stocks,1):
+            code=item["code"]
+            if code in s["positions"] or code in s["sent_today"]: continue
+            q=quote(code)
+            if q:
+                stats["quote_ok"]+=1
+                turnover=q["price"]*q["volume"]
+                if (MIN_PRICE<=q["price"]<=MAX_PRICE and
+                    turnover>=MIN_TURNOVER and q["gain"]>=0.25):
+                    candidates.append((turnover,item,q))
+                    stats["first_pass"]+=1
+            if i%100==0: log(f"전체 스캔 {i}/{len(stocks)}")
+            time.sleep(0.04)
 
-    for code in codes:
-        try:
-            q=get_quote(code)
-            if not q:
-                continue
+        candidates.sort(key=lambda x:x[0],reverse=True)
+        log(f"1차 결과: 전체={len(stocks)}, 시세성공={stats['quote_ok']}, "
+            f"후보={stats['first_pass']}")
 
-            if code in s["positions"]:
-                monitor(s,code,q)
-                continue
+        for _,item,q in candidates[:MAX_DETAIL]:
+            if len(s["positions"])>=MAX_POS: break
+            code=item["code"]
+            stats["detail"]+=1
+            try:
+                p,reason=analyze(code,item["name"],q)
+                if not p:
+                    stats["reject"][reason]=stats["reject"].get(reason,0)+1
+                    continue
+                s["positions"][code]=p
+                s["sent_today"][code]=t.isoformat()
+                send(entry_msg(p))
+                stats["sent"]+=1
+                log(f"신규 시그널: {p['name']} ({code})")
+                time.sleep(0.3)
+            except Exception as e:
+                log(f"분석오류 {code}: {type(e).__name__}: {e}")
 
-            if len(s["positions"])>=MAX_POS:
-                continue
-            if code in s["sent_today"]:
-                continue
+        log(f"상세분석={stats['detail']}, 시그널={stats['sent']}, "
+            f"탈락사유={stats['reject']}")
 
-            h=get_history(code)
-            if not h:
-                continue
-            p=create_signal(code,names[code],q,h)
-            if not p:
-                continue
-
-            s["positions"][code]=p
-            s["sent_today"][code]=t.isoformat()
-            slot=list(s["positions"]).index(code)+1
-            send_entry(p,slot)
-            time.sleep(0.2)
-
-        except Exception as e:
-            print(f"종목 처리 오류 {code}: {type(e).__name__}: {e}")
-
-    if len(s["positions"])>=MAX_POS and s.get("full_notice_day")!=today:
-        send(f"⏸️ 슬롯 {MAX_POS}개 모두 사용 중입니다.\n기존 시그널만 추적합니다.")
-        s["full_notice_day"]=today
+    if len(s["positions"])>=MAX_POS and s.get("full_notice_day")!=s["day"]:
+        send(f"⏸️ 시그널 슬롯 {MAX_POS}개 모두 사용 중\n기존 시그널을 추적합니다.")
+        s["full_notice_day"]=s["day"]
 
     s["last_run"]=now().isoformat()
-    save_state(s)
-    print("활성 시그널:",len(s["positions"]))
+    save(s)
+    log(f"활성 시그널: {len(s['positions'])}")
 
 if __name__=="__main__":
     main()
+```
