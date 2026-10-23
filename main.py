@@ -1,447 +1,612 @@
-# KOREA MULTI-STRATEGY PROFIT MAXIMIZER & LIVE MONITOR V32.1.9
-import os, json, time, requests, re
-from datetime import datetime, timezone, timedelta
-import pandas as pd
-import numpy as np
+#!/usr/bin/env python3
+"""Korea Daily Stock Signal Monitor — informational, simulated tracking only.
+
+Signals are based on completed daily candles. Entry prices and exits are
+reference prices, not guaranteed fills. No brokerage orders are placed.
+"""
+
+import html
+import json
+import logging
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import FinanceDataReader as fdr
+import numpy as np
+import pandas as pd
+import requests
 
-V = "32.1.9"
-STATE = "active_positions.json"
-TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT = os.getenv("CHAT_ID", "")
+# ----------------------------- Configuration -----------------------------
+VERSION = "33.1.0"
 KST = timezone(timedelta(hours=9))
+STATE_FILE = Path(os.getenv("STOCK_SIGNAL_STATE", "stock_signal_state.json"))
+TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID") or "").strip()
 
-MAX_SLOTS = 8  # 최대 슬롯 8개 고정
+MAX_POSITIONS = int(os.getenv("STOCK_MAX_POSITIONS", "8"))
+MAX_SCAN = int(os.getenv("STOCK_MAX_SCAN", "150"))
+MIN_DAILY_TURNOVER_KRW = float(os.getenv("STOCK_MIN_TURNOVER_KRW", "5000000000"))
+MAX_HOLDING_SESSIONS = int(os.getenv("STOCK_MAX_HOLDING_SESSIONS", "20"))
+# Set to a broker/tax-specific round-trip cost estimate. Default 0 means
+# reported performance is explicitly gross and excludes all costs.
+ROUND_TRIP_COST_PCT = float(os.getenv("STOCK_ROUND_TRIP_COST_PCT", "0"))
 
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
-        if isinstance(obj, np.ndarray): return obj.tolist()
-        if isinstance(obj, (np.bool_, bool)): return bool(obj)
-        return super(NpEncoder, self).default(obj)
+# Signal uses a completed daily candle only. The script is intended to run
+# after the Korean cash market close; before 16:10 KST today's candle is dropped.
+SIGNAL_AFTER_HOUR = 16
+SIGNAL_AFTER_MINUTE = 10
 
-def now(): return datetime.now(KST)
-def ts(): return now().strftime("%Y-%m-%d %H:%M:%S")
+TP_R = (1.5, 2.5, 4.0)
+INITIAL_STOP_ATR = 1.5
+MIN_STOP_PCT = 0.01
+MAX_STOP_PCT = 0.05
 
-def m(x):
-    try:
-        val = float(x)
-        if np.isnan(val) or np.isinf(val): return "0원"
-        return f"{int(val):,}원"
-    except: return "0원"
+HEADERS = {"User-Agent": "Mozilla/5.0 KoreaDailySignal/33.0"}
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="[%(asctime)s KST] %(levelname)s %(message)s",
+)
+log = logging.getLogger("korea-stock-signal")
 
-def save(p, x):
-    q = p + ".tmp"
-    with open(q, "w", encoding="utf8") as f:
-        json.dump(x, f, ensure_ascii=False, indent=2, cls=NpEncoder)
-    os.replace(q, p)
 
-def load(p, d):
-    try:
-        with open(p, encoding="utf8") as f: return json.load(f)
-    except: return d
+def now():
+    return datetime.now(KST)
 
-def tg(x):
-    if not TOKEN or not CHAT: 
-        print("[ERROR] TELEGRAM_TOKEN 또는 CHAT_ID가 설정되지 않았습니다.")
-        return False
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT, "text": x, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=15)
-        if not r.ok:
-            print(f"[ERROR] Telegram API 요청 실패: {r.text}")
-        return r.ok
-    except Exception as e:
-        print(f"[ERROR] Telegram 예외 발생: {e}")
-        return False
 
-def get_state():
-    current_month = now().strftime("%Y-%m")
-    default_stats = {"total_closed": 0, "tp3_end": 0, "tp2_end": 0, "tp1_end": 0, "loss_end": 0, "draws": 0}
-    default_state = {
-        "positions": [], "sent": [], "last_bear_state": None,
-        "total_stats": dict(default_stats),
-        "monthly_stats": {"month": current_month, **default_stats}
+def now_text():
+    return now().strftime("%Y-%m-%d %H:%M:%S KST")
+
+
+def default_state():
+    return {
+        "version": VERSION,
+        "positions": {},
+        "history": [],
+        "last_signal_date": {},
+        "last_market_report_date": None,
     }
-    s = load(STATE, default_state)
-    if not isinstance(s, dict): s = default_state
-    s.setdefault("positions", [])
-    s.setdefault("sent", [])
-    s.setdefault("last_bear_state", None)
-    s.setdefault("total_stats", dict(default_stats))
-    for k in default_stats:
-        if k != "month": s["total_stats"].setdefault(k, 0)
-    
-    monthly = s.get("monthly_stats", {"month": current_month, **default_stats})
-    if monthly.get("month") != current_month:
-        s["monthly_stats"] = {"month": current_month, **default_stats}
-    else:
-        for k in default_stats:
-            if k != "month": monthly.setdefault(k, 0)
-    return s
 
-def calculate_atr(df, period=14):
-    high, low, close = df['High'], df['Low'], df['Close']
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
 
-def is_market_open():
-    n = now()
-    if n.weekday() >= 5: return False
-    cur = n.hour * 60 + n.minute
-    return (8 * 60 + 50) <= cur <= (15 * 60 + 40)
-
-def get_stock_news(code):
+def load_state():
+    if not STATE_FILE.exists():
+        return default_state()
     try:
-        url = f"https://finance.naver.com/item/news_news.naver?code={code}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        titles = re.findall(r'<a href=".*?article_id=.*?".*?class="tit".*?>(.*?)</a>', res.text)
-        clean_titles = []
-        for t in titles[:2]:
-            clean_t = re.sub(r'<[^>]+>', '', t).strip()
-            if clean_t: clean_titles.append(f"• {clean_t}")
-        return "\n".join(clean_titles) if clean_titles else None
-    except Exception as e:
-        print(f"[WARN] 뉴스 데이터 크롤링 실패 [{code}]: {e}")
-        return None
+        with STATE_FILE.open("r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        # Do not silently erase historical performance or active positions.
+        raise RuntimeError(f"상태 파일을 읽을 수 없습니다: {STATE_FILE}: {exc}") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("상태 파일 형식이 올바르지 않습니다.")
+    defaults = default_state()
+    for key, value in defaults.items():
+        state.setdefault(key, value)
+    if not isinstance(state["positions"], dict):
+        raise RuntimeError("상태 파일의 positions 형식이 올바르지 않습니다.")
+    if not isinstance(state["history"], list):
+        raise RuntimeError("상태 파일의 history 형식이 올바르지 않습니다.")
+    state["version"] = VERSION
+    return state
 
-def get_company_info(krx_row):
+
+def save_state(state):
+    state["version"] = VERSION
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
     try:
-        sector = krx_row.get('Sector', '')
-        industry = krx_row.get('Industry', '')
-        info_parts = []
-        if pd.notna(sector) and sector: info_parts.append(f"업종: {sector}")
-        if pd.notna(industry) and industry: info_parts.append(f"주요제품: {industry}")
-        return " | ".join(info_parts) if info_parts else None
-    except:
-        return None
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_FILE)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
-def check_market_shield_and_report(last_bear_state):
-    is_bear_market = False
+
+def send_telegram(text):
+    if not TOKEN or not CHAT_ID:
+        log.error("TELEGRAM_TOKEN 또는 TELEGRAM_CHAT_ID/CHAT_ID가 설정되지 않았습니다.")
+        return False
     try:
-        kospi_df = fdr.DataReader('KS11', datetime.now() - timedelta(days=40))
-        kosdaq_df = fdr.DataReader('KQ11', datetime.now() - timedelta(days=40))
-        
-        kospi_close, kospi_prev = float(kospi_df['Close'].iloc[-1]), float(kospi_df['Close'].iloc[-2])
-        kospi_chg = ((kospi_close - kospi_prev) / kospi_prev) * 100
-        kospi_ma20 = float(kospi_df['Close'].rolling(20).mean().iloc[-1])
-
-        kosdaq_close, kosdaq_prev = float(kosdaq_df['Close'].iloc[-1]), float(kosdaq_df['Close'].iloc[-2])
-        kosdaq_chg = ((kosdaq_close - kosdaq_prev) / kosdaq_prev) * 100
-        kosdaq_ma20 = float(kosdaq_df['Close'].rolling(20).mean().iloc[-1])
-
-        if kospi_close < kospi_ma20: is_bear_market = True
-        if kosdaq_close < kosdaq_ma20: is_bear_market = True
-        if kospi_chg <= -2.0 or kosdaq_chg <= -2.0: is_bear_market = True
-
-        if last_bear_state != is_bear_market:
-            if is_bear_market:
-                tg(f"🛡 <b>[하락장 방어 모드 발동]</b> 🚨\n• 코스피: <code>{kospi_close:,.2f}</code> ({kospi_chg:+.2f}%)\n• 코스닥: <code>{kosdaq_close:,.2f}</code> ({kosdaq_chg:+.2f}%)")
-            else:
-                tg("📊 <b>[수익 추구 장세 재개]</b> 📈\n지수 안정세: 고수익 멀티 전략 스캐너가 가동됩니다.")
-        return is_bear_market
-    except Exception as e:
-        print(f"[WARN] 지수 하락장 체크 실패: {e}")
+        response = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("ok"):
+            log.error("Telegram API 응답 오류: %s", result)
+            return False
+        return True
+    except Exception:
+        log.exception("Telegram 전송 실패")
         return False
 
-def format_stats_report(stats_dict):
-    total = stats_dict.get("total_closed", 0)
-    tp3, tp2, tp1, loss, draws = stats_dict.get("tp3_end", 0), stats_dict.get("tp2_end", 0), stats_dict.get("tp1_end", 0), stats_dict.get("loss_end", 0), stats_dict.get("draws", 0)
-    wins = tp1 + tp2 + tp3
-    win_rate = (wins / total * 100) if total > 0 else 0.0
-    return f"""📊 <b>[시그널 누적 성과 통계]</b>
-━━━━━━━━━━━━━━━━━━━━━━━
-• <b>총 종료 시그널:</b> <b>{total}건</b>
-• 🎯 <b>TP3 종료:</b> {tp3}건
-• 🎯 <b>TP2 종료:</b> {tp2}건
-• 🎯 <b>TP1 종료:</b> {tp1}건
-• 🛑 <b>손절 종료:</b> {loss}건
-• ⏱ <b>타임스톱/무승부:</b> {draws}건
 
-🏆 <b>최종 승률: {win_rate:.1f}%</b>
-📈 승리 {wins}건 · 손절 {loss}건
-━━━━━━━━━━━━━━━━━━━━━━━"""
+def escape(value):
+    return html.escape(str(value), quote=False)
 
-def update_stats_record(stats_dict, end_type):
-    stats_dict["total_closed"] += 1
-    if end_type == 'TP3': stats_dict["tp3_end"] += 1
-    elif end_type == 'TP2': stats_dict["tp2_end"] += 1
-    elif end_type == 'TP1': stats_dict["tp1_end"] += 1
-    elif end_type == 'LOSS': stats_dict["loss_end"] += 1
-    elif end_type == 'DRAW': stats_dict["draws"] += 1
 
-def send_slot_status_report(positions, is_bear):
-    bear_text = "하락장 방어 모드 유지 중" if is_bear else "정상 매매 모드 가동 중"
-    used_slots = len(positions)
-    avail_slots = MAX_SLOTS - used_slots
-    
-    msg_lines = [
-        "📊 <b>[실시간 포트폴리오 슬롯 현황]</b> 📊",
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 <b>보유 슬롯: [ {used_slots} / {MAX_SLOTS} ]</b> ({avail_slots}개 가용 중)",
-        f"🛡 <b>시장 상태:</b> {bear_text}\n",
-        "🪙 <b>[현재 보유 포지션 리스트]</b>\n"
-    ]
-    
-    if not positions:
-        msg_lines.append("현재 보유 중인 포지션이 없습니다.")
+def normalize_ohlcv(raw):
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    df = raw.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    required = ["open", "high", "low", "close", "volume"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+    df = df[required].apply(pd.to_numeric, errors="coerce").dropna()
+    if df.empty:
+        return df
+    # Normalize dates to naive local dates for consistent daily-bar comparisons.
+    dates = pd.to_datetime(df.index, errors="coerce")
+    try:
+        if getattr(dates, "tz", None) is not None:
+            dates = dates.tz_convert("Asia/Seoul").tz_localize(None)
+    except (TypeError, AttributeError):
+        pass
+    df.index = pd.DatetimeIndex(dates).normalize()
+    df = df[~df.index.isna()].sort_index()
+    return df[~df.index.duplicated(keep="last")]
+
+
+def get_daily_bars(symbol, calendar_days=260):
+    start = (now().date() - timedelta(days=calendar_days)).isoformat()
+    raw = fdr.DataReader(str(symbol), start)
+    df = normalize_ohlcv(raw)
+    if df.empty:
+        return df
+    today = now().date()
+    after_close = (now().hour, now().minute) >= (SIGNAL_AFTER_HOUR, SIGNAL_AFTER_MINUTE)
+    # During the session and shortly after close, today's daily bar may still
+    # be incomplete/unstable. Never use it for a new signal or exit decision.
+    if not after_close and df.index[-1].date() == today:
+        df = df.iloc[:-1]
+    return df
+
+
+def add_indicators(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    close = out["close"]
+    previous_close = close.shift(1)
+    true_range = pd.concat([
+        out["high"] - out["low"],
+        (out["high"] - previous_close).abs(),
+        (out["low"] - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    out["ema20"] = close.ewm(span=20, adjust=False, min_periods=20).mean()
+    out["ema50"] = close.ewm(span=50, adjust=False, min_periods=50).mean()
+    out["atr14"] = true_range.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out["rsi14"] = 100 - (100 / (1 + rs))
+    out.loc[(avg_loss == 0) & (avg_gain > 0), "rsi14"] = 100
+    out.loc[(avg_loss == 0) & (avg_gain == 0), "rsi14"] = 50
+    out["turnover"] = out["close"] * out["volume"]
+    out["volume_ma20_prev"] = out["volume"].shift(1).rolling(20, min_periods=20).mean()
+    out["turnover_ma20_prev"] = out["turnover"].shift(1).rolling(20, min_periods=20).mean()
+    out["prior20_high"] = out["high"].shift(1).rolling(20, min_periods=20).max()
+    out["prior5_low"] = out["low"].shift(1).rolling(5, min_periods=5).min()
+    out["close_position"] = (
+        (out["close"] - out["low"]) / (out["high"] - out["low"]).replace(0, np.nan)
+    )
+    return out.replace([np.inf, -np.inf], np.nan)
+
+
+def market_regime():
+    """Return market context or raise; missing index data blocks new entries."""
+    results = {}
+    for label, code in (("KOSPI", "KS11"), ("KOSDAQ", "KQ11")):
+        df = get_daily_bars(code, calendar_days=90)
+        if len(df) < 25:
+            raise RuntimeError(f"{label} 지수 데이터가 부족합니다.")
+        if df.index[-1].date() != now().date():
+            raise RuntimeError(f"{label} 최신 일봉이 오늘 날짜가 아닙니다. 데이터 지연 또는 휴장으로 보고 신규 신호를 중단합니다.")
+        close = df["close"]
+        ma20 = close.rolling(20, min_periods=20).mean().iloc[-1]
+        previous = close.iloc[-2]
+        change_pct = (close.iloc[-1] / previous - 1) * 100 if previous else 0
+        if not np.isfinite(ma20):
+            raise RuntimeError(f"{label} 20일 이동평균 계산에 실패했습니다.")
+        results[label] = {
+            "close": float(close.iloc[-1]),
+            "ma20": float(ma20),
+            "change_pct": float(change_pct),
+            "below_ma20": bool(close.iloc[-1] < ma20),
+        }
+    # Conservative regime filter: pause if both indices are below MA20, or
+    # either index suffers a 2%+ daily decline. Data failure is not neutral.
+    bear = (
+        (results["KOSPI"]["below_ma20"] and results["KOSDAQ"]["below_ma20"])
+        or results["KOSPI"]["change_pct"] <= -2.0
+        or results["KOSDAQ"]["change_pct"] <= -2.0
+    )
+    return bear, results
+
+
+def list_candidates():
+    listing = fdr.StockListing("KRX")
+    if listing is None or listing.empty or "Code" not in listing or "Name" not in listing:
+        raise RuntimeError("KRX 종목 목록을 읽지 못했습니다.")
+    listing = listing.dropna(subset=["Code", "Name"]).copy()
+    listing["Code"] = listing["Code"].astype(str).str.zfill(6)
+    # Use a stated, stable selection basis rather than relying on provider row order.
+    if "Marcap" in listing.columns:
+        listing["_rank"] = pd.to_numeric(listing["Marcap"], errors="coerce").fillna(0)
+        listing = listing.sort_values("_rank", ascending=False)
+    elif "MarketCap" in listing.columns:
+        listing["_rank"] = pd.to_numeric(listing["MarketCap"], errors="coerce").fillna(0)
+        listing = listing.sort_values("_rank", ascending=False)
     else:
-        for idx, pos in enumerate(positions, 1):
-            code = pos.get("code")
-            name = pos.get("name")
-            entry = pos.get("entry", 0)
-            sl = pos.get("sl", 0)
-            tp1 = pos.get("tp1", 0)
-            
-            curr_price = entry
-            pct_chg = 0.0
-            try:
-                df = fdr.DataReader(code)
-                if not df.empty:
-                    curr_price = float(df['Close'].iloc[-1])
-                    pct_chg = ((curr_price - entry) / entry) * 100
-            except: pass
-            
-            sl_pct = ((sl - entry) / entry) * 100
-            tp1_pct = ((tp1 - entry) / entry) * 100
-            naver_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
-            tv_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
-            
-            item_txt = f"""{idx}️⃣ <b>{name} ({code})</b>
-• <b>진입가:</b> {m(entry)}
-• <b>현재가:</b> {m(curr_price)} (<code>{pct_chg:+.2f}%</code>)
-• <b>손절가(SL):</b> {m(sl)} ({sl_pct:.1f}%)
-• <b>1차 목표가(TP1):</b> {m(tp1)} (+{tp1_pct:.1f}%)
-• <b>상태:</b> 손절가 상회 홀딩 중 🟢
-📲 차트: <a href="{naver_url}">네이버</a> | <a href="{tv_url}">트레이딩뷰</a>"""
-            msg_lines.append(item_txt)
-            
-    msg_lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━")
-    msg_lines.append("💡 <i>장중 5분 주기로 손절가 및 목표가 도착 여부를 실시간 감시하고 있습니다.</i>")
-    tg("\n".join(msg_lines))
+        listing = listing.sort_values("Code")
+        log.warning("시가총액 열이 없어 종목코드 순서로 스캔합니다.")
+    # Exclude preferred shares and obvious non-common share codes where possible.
+    listing = listing[~listing["Code"].str.endswith("5")]
+    return listing.head(MAX_SCAN)
 
-def main():
-    print(f" KOREA MULTI-STRATEGY PROFIT MAXIMIZER V{V}")
-    
-    state = get_state()
-    total_stats, monthly_stats, last_bear_state = state.get("total_stats"), state.get("monthly_stats"), state.get("last_bear_state")
-    is_bear_market = check_market_shield_and_report(last_bear_state)
-    state["last_bear_state"] = is_bear_market
-    positions = state.get("positions", [])
 
-    # 정기 알림 체크 (08:55 장 시작 전, 15:35 장 마감 후 슬롯 리포트 발송)
-    n = now()
-    cur_time_str = n.strftime("%H:%M")
-    sent_reports = state.get("sent_reports", [])
-    today_str = n.strftime("%Y-%m-%d")
-    
-    if cur_time_str in ["08:55", "15:35"]:
-        report_key = f"{today_str}_{cur_time_str}"
-        if report_key not in sent_reports:
-            send_slot_status_report(positions, is_bear_market)
-            sent_reports.append(report_key)
-            state["sent_reports"] = sent_reports[-10:]
+def make_signal(df):
+    """Return an objective daily-chart setup or None."""
+    if len(df) < 60:
+        return None
+    data = add_indicators(df)
+    row = data.iloc[-1]
+    prev = data.iloc[-2]
+    required = [
+        row["ema20"], row["ema50"], row["atr14"], row["rsi14"],
+        row["volume_ma20_prev"], row["turnover_ma20_prev"],
+        row["prior20_high"], row["prior5_low"], row["close_position"],
+    ]
+    if not all(np.isfinite(value) for value in required):
+        return None
+    close = float(row["close"])
+    if close <= 0 or float(row["turnover"]) < MIN_DAILY_TURNOVER_KRW:
+        return None
+    if float(row["turnover_ma20_prev"]) < MIN_DAILY_TURNOVER_KRW:
+        return None
 
-    if not is_market_open(): 
-        save(STATE, state)
-        print("[INFO] 장 운영 시간이 아닙니다. 종료합니다.")
+    trend_ok = close > row["ema20"] > row["ema50"]
+    rsi_ok = 50 <= row["rsi14"] <= 70
+    strong_close = row["close_position"] >= 0.65
+    volume_ratio = (
+        float(row["volume"]) / float(row["volume_ma20_prev"])
+        if row["volume_ma20_prev"] > 0 else 0
+    )
+    if not trend_ok or not rsi_ok or not strong_close:
+        return None
+
+    # Pullback: at least one of the prior five sessions tested the 20-day EMA
+    # area, and the latest completed candle closes above the previous high.
+    recent = data.iloc[-6:-1]
+    recent_touch = bool((recent["low"] <= recent["ema20"] + 0.5 * recent["atr14"]).any())
+    pullback = recent_touch and close > float(prev["high"]) and volume_ratio >= 0.8
+
+    # Breakout: close above the previous 20-session high with volume expansion.
+    breakout = close > float(row["prior20_high"]) and volume_ratio >= 1.5
+    if not (pullback or breakout):
+        return None
+
+    atr_value = float(row["atr14"])
+    stop_pct = min(MAX_STOP_PCT, max(MIN_STOP_PCT, INITIAL_STOP_ATR * atr_value / close))
+    risk = close * stop_pct
+    sl = close - risk
+    tps = [close + risk * r for r in TP_R]
+    strategy = "20일선 눌림 후 반등" if pullback else "20일 고점 돌파"
+    date_text = data.index[-1].strftime("%Y-%m-%d")
+    return {
+        "date": date_text,
+        "entry_ref": close,
+        "sl": sl,
+        "tp1": tps[0],
+        "tp2": tps[1],
+        "tp3": tps[2],
+        "risk_pct": stop_pct * 100,
+        "strategy": strategy,
+        "rsi": float(row["rsi14"]),
+        "atr": atr_value,
+        "volume_ratio": volume_ratio,
+        "turnover": float(row["turnover"]),
+    }
+
+
+def format_price(price):
+    if price >= 1000:
+        return f"{price:,.0f}"
+    if price >= 100:
+        return f"{price:,.1f}"
+    if price >= 1:
+        return f"{price:,.2f}"
+    return f"{price:.4f}"
+
+
+def signal_message(name, code, signal, market):
+    market_state = "신규진입 필터 통과" if not market[0] else "방어모드 — 신규진입 중지"
+    return (
+        "📊 <b>한국 주식 일봉 시그널 (모의 기준)</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"종목: <b>{escape(name)} ({escape(code)})</b>\n"
+        f"전략: <b>{escape(signal['strategy'])}</b>\n"
+        f"기준봉: {signal['date']} 일봉 종가 확정 기준\n"
+        f"기준가격: <code>{format_price(signal['entry_ref'])}</code>원\n"
+        f"손절 기준: <code>{format_price(signal['sl'])}</code>원 (-{signal['risk_pct']:.2f}%)\n"
+        f"TP1: <code>{format_price(signal['tp1'])}</code>원 (+{TP_R[0]:g}R)\n"
+        f"TP2: <code>{format_price(signal['tp2'])}</code>원 (+{TP_R[1]:g}R)\n"
+        f"TP3: <code>{format_price(signal['tp3'])}</code>원 (+{TP_R[2]:g}R)\n"
+        f"RSI(14): {signal['rsi']:.1f} | 거래량/20일 평균: {signal['volume_ratio']:.2f}배\n"
+        f"시장 상태: {market_state}\n"
+        f"발송: {now_text()}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ 종가 기준 모의 신호이며 실제 체결·수익을 보장하지 않습니다.\n"
+        "다음 거래일 가격이 기준가에서 크게 이탈하면 신호를 추격하지 마세요."
+    )
+
+
+def close_position(state, code, position, exit_price, exit_date, reason):
+    entry = float(position["entry_ref"])
+    gross_pct = (exit_price / entry - 1) * 100 if entry else 0.0
+    net_pct = gross_pct - ROUND_TRIP_COST_PCT
+    result = "WIN" if net_pct > 0 else "LOSS" if net_pct < 0 else "BREAKEVEN"
+    record = {
+        "code": code,
+        "name": position.get("name", code),
+        "strategy": position.get("strategy"),
+        "entry_date": position.get("entry_date"),
+        "exit_date": exit_date,
+        "entry_ref": entry,
+        "exit_ref": float(exit_price),
+        "gross_pct": gross_pct,
+        "assumed_round_trip_cost_pct": ROUND_TRIP_COST_PCT,
+        "net_pct": net_pct,
+        "result": result,
+        "reason": reason,
+        "highest_tp": int(position.get("highest_tp", 0)),
+    }
+    state["history"].append(record)
+    state["history"] = state["history"][-2000:]
+    state["positions"].pop(code, None)
+    label = {"WIN": "비용 가정 후 플러스", "LOSS": "비용 가정 후 마이너스", "BREAKEVEN": "본전"}[result]
+    msg = (
+        "🏁 <b>주식 시그널 모의 추적 종료</b>\n"
+        f"{escape(position.get('name', code))} ({escape(code)})\n"
+        f"결과: <b>{label}</b> | 사유: {escape(reason)}\n"
+        f"기준 진입 {format_price(entry)}원 → 기준 종료 {format_price(exit_price)}원\n"
+        f"총수익률 {gross_pct:+.2f}% | 비용 가정 차감 후 {net_pct:+.2f}%\n"
+        f"기준 비용: 왕복 {ROUND_TRIP_COST_PCT:.3f}% | 기준일 {exit_date}\n"
+        "※ 실제 사용자의 체결가·비용과 다를 수 있는 모의 추적입니다."
+    )
+    if not send_telegram(msg):
+        log.error("종료 알림 미전송: %s", code)
+    log.info("포지션 종료 %s %s %s net=%+.3f%%", code, reason, result, net_pct)
+
+
+def monitor_positions(state):
+    history_before = len(state["history"])
+    for code, position in list(state["positions"].items()):
+        try:
+            bars = get_daily_bars(code, calendar_days=260)
+            if len(bars) < 2:
+                continue
+            last_processed = position.get("last_processed_date", position.get("entry_date", ""))
+            new_bars = bars[bars.index.strftime("%Y-%m-%d") > last_processed]
+            if new_bars.empty:
+                continue
+
+            for bar_date, bar in new_bars.iterrows():
+                date_text = bar_date.strftime("%Y-%m-%d")
+                entry = float(position["entry_ref"])
+                stop = float(position["sl"])
+                open_price = float(bar["open"])
+                high = float(bar["high"])
+                low = float(bar["low"])
+                close = float(bar["close"])
+
+                # Gap-through-stop: use the open, not the requested stop, as a
+                # more realistic adverse reference. Intraday paths are unknown.
+                if open_price <= stop:
+                    close_position(state, code, position, open_price, date_text, "시가 갭 하락으로 스탑 하회")
+                    break
+                # Conservative OHLC convention: if the day's low touches the
+                # active stop, process the stop before any target in that bar.
+                if low <= stop:
+                    reason = "초기 손절" if position.get("highest_tp", 0) == 0 else "상향 스탑 종료"
+                    close_position(state, code, position, stop, date_text, reason)
+                    break
+
+                # TP3 is a full virtual exit; bar-path ambiguities are treated
+                # conservatively by the active-stop checks above.
+                if high >= float(position["tp3"]):
+                    close_position(state, code, position, float(position["tp3"]), date_text, "TP3 도달")
+                    break
+
+                reached = 0
+                if high >= float(position["tp2"]):
+                    reached = 2
+                elif high >= float(position["tp1"]):
+                    reached = 1
+
+                old_level = int(position.get("highest_tp", 0))
+                if reached > old_level:
+                    position["highest_tp"] = reached
+                    # Virtual trailing rule: TP1 -> entry stop; TP2 -> TP1 stop.
+                    position["sl"] = float(position["entry_ref"] if reached == 1 else position["tp1"])
+                    position["last_processed_date"] = date_text
+                    notice = (
+                        f"🎯 <b>{escape(position.get('name', code))} TP{reached} 도달</b>\n"
+                        f"기준봉 {date_text} | 모의 스탑을 {format_price(position['sl'])}원으로 조정했습니다.\n"
+                        "부분청산을 의미하지 않으며, 가격 순서는 일봉 OHLC 기준 추정입니다."
+                    )
+                    if not send_telegram(notice):
+                        log.error("TP 알림 미전송: %s TP%s", code, reached)
+                    # If the bar also retraced through the newly raised stop,
+                    # assume the target was reached first and stop second.
+                    if low <= float(position["sl"]):
+                        reason = "TP1 후 본전 스탑" if reached == 1 else "TP2 후 TP1 스탑"
+                        close_position(state, code, position, float(position["sl"]), date_text, reason)
+                        break
+                else:
+                    position["last_processed_date"] = date_text
+
+                held_sessions = int(position.get("held_sessions", 0)) + 1
+                position["held_sessions"] = held_sessions
+                if held_sessions >= MAX_HOLDING_SESSIONS:
+                    close_position(state, code, position, close, date_text, f"보유 기간 {MAX_HOLDING_SESSIONS}거래일 종료")
+                    break
+        except Exception:
+            log.exception("포지션 감시 실패: %s", code)
+    save_state(state)
+    return len(state["history"]) - history_before
+
+
+def performance_message(state):
+    history = state["history"]
+    if not history:
+        return "📊 종료된 모의 시그널이 아직 없습니다."
+    wins = sum(row["result"] == "WIN" for row in history)
+    losses = sum(row["result"] == "LOSS" for row in history)
+    breakeven = sum(row["result"] == "BREAKEVEN" for row in history)
+    total = len(history)
+    win_rate = wins / total * 100 if total else 0.0
+    avg_net = sum(float(row["net_pct"]) for row in history) / total if total else 0.0
+    cost_text = f"왕복 비용 가정 {ROUND_TRIP_COST_PCT:.3f}%" if ROUND_TRIP_COST_PCT else "비용 미포함(총수익률)"
+    return (
+        "📊 <b>주식 시그널 모의 성과</b>\n"
+        f"종료 {total}건 | 플러스 {wins} | 마이너스 {losses} | 본전 {breakeven}\n"
+        f"플러스 비율: <b>{win_rate:.1f}%</b> | 평균 손익률: {avg_net:+.2f}%\n"
+        f"기준: {cost_text}\n"
+        "※ 실제 체결 성과가 아닌 기준가 기반 시뮬레이션입니다. 미청산 포지션은 제외됩니다."
+    )
+
+
+def send_market_report(regime):
+    bear, values = regime
+    state_text = "방어 모드: 신규 신호 중지" if bear else "필터 통과"
+    msg = (
+        "📈 <b>시장 필터 (완료 일봉 기준)</b>\n"
+        f"코스피: {values['KOSPI']['close']:,.2f} | 20일선 {values['KOSPI']['ma20']:,.2f} | 일간 {values['KOSPI']['change_pct']:+.2f}%\n"
+        f"코스닥: {values['KOSDAQ']['close']:,.2f} | 20일선 {values['KOSDAQ']['ma20']:,.2f} | 일간 {values['KOSDAQ']['change_pct']:+.2f}%\n"
+        f"판정: <b>{state_text}</b>"
+    )
+    send_telegram(msg)
+
+
+def scan_new_signals(state, regime):
+    bear, _ = regime
+    if bear:
+        log.warning("시장 방어 필터 발동: 신규 신호를 만들지 않습니다.")
+        return
+    if len(state["positions"]) >= MAX_POSITIONS:
+        log.info("보유 슬롯이 가득 차 신규 스캔을 생략합니다.")
         return
 
-    updated_positions = []
-
-    for pos in positions:
-        code = pos.get("code")
+    today = now().strftime("%Y-%m-%d")
+    active = set(state["positions"])
+    sent_count = 0
+    candidates = list_candidates()
+    for _, row in candidates.iterrows():
+        if len(state["positions"]) >= MAX_POSITIONS:
+            break
+        code = str(row["Code"]).zfill(6)
+        name = str(row["Name"])
+        if code in active or state["last_signal_date"].get(code) == today:
+            continue
         try:
-            df = fdr.DataReader(code)
-            if df.empty:
-                print(f"[WARN] 주가 데이터 조회 실패 ({code})")
-                updated_positions.append(pos)
+            bars = get_daily_bars(code)
+            signal = make_signal(bars)
+            if not signal:
                 continue
-            
-            current_price = float(df['Close'].iloc[-1])
-            sl, entry, tp1, tp2, tp3 = pos.get("sl", 0), pos.get("entry", 0), pos.get("tp1", 0), pos.get("tp2", 0), pos.get("tp3", 0)
-            highest_reached = pos.get("highest_reached", "NONE")
-            
-            entry_time_str = pos.get("time", ts())
-            try: days_elapsed = (now().date() - datetime.strptime(entry_time_str.split()[0], "%Y-%m-%d").date()).days
-            except: days_elapsed = 0
-
-            # 3차 목표가 달성
-            if current_price >= tp3:
-                update_stats_record(total_stats, 'TP3')
-                update_stats_record(monthly_stats, 'TP3')
-                tg(f"🏆 <b>[최종 TP3 수익 극대화 완료]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
+            if signal["date"] != today:
+                log.info("오늘 확정된 신호봉이 아니므로 제외: %s (%s)", code, signal["date"])
                 continue
-
-            # 2차 및 1차 목표가 달성 스탑로스 상향
-            if current_price >= tp2 and highest_reached not in ['TP3', 'TP2']:
-                pos["highest_reached"] = 'TP2'
-                pos["sl"] = tp1
-                tg(f"🎯 <b>[2차 목표가 달성]</b> - 손절가를 1차 목표가({m(tp1)})로 올려 수익 방어! ({pos.get('name')})")
-            elif current_price >= tp1 and highest_reached not in ['TP3', 'TP2', 'TP1']:
-                pos["highest_reached"] = 'TP1'
-                pos["sl"] = entry
-                tg(f"🎯 <b>[1차 목표가 달성]</b> - 손절가를 본전({m(entry)})으로 올려 무위험 전환! ({pos.get('name')})")
-
-            # 7일 경과 청산
-            if days_elapsed >= 7:
-                stat_key = highest_reached if highest_reached in ['TP1', 'TP2'] else 'DRAW'
-                update_stats_record(total_stats, stat_key)
-                update_stats_record(monthly_stats, stat_key)
-                tg(f"⏱ <b>[기간 달성 회전 청산]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
+            # The signal reference is the completed candle close. It is not
+            # represented as a guaranteed next-session fill.
+            position = {
+                "code": code,
+                "name": name,
+                "strategy": signal["strategy"],
+                "entry_ref": signal["entry_ref"],
+                "sl": signal["sl"],
+                "tp1": signal["tp1"],
+                "tp2": signal["tp2"],
+                "tp3": signal["tp3"],
+                "entry_date": signal["date"],
+                "last_processed_date": signal["date"],
+                "created_at": now_text(),
+                "highest_tp": 0,
+                "held_sessions": 0,
+                "risk_pct": signal["risk_pct"],
+            }
+            message = signal_message(name, code, signal, regime)
+            if not send_telegram(message):
+                log.error("신호 전송 실패; 포지션으로 등록하지 않습니다: %s", code)
                 continue
+            state["positions"][code] = position
+            state["last_signal_date"][code] = today
+            active.add(code)
+            sent_count += 1
+            save_state(state)
+            log.info("신호 발송: %s %s %s", code, name, signal["strategy"])
+            time.sleep(0.35)
+        except Exception:
+            log.exception("종목 분석 실패: %s %s", code, name)
 
-            # 손절가 이탈
-            if current_price <= sl:
-                if highest_reached in ['TP1', 'TP2'] or sl >= entry:
-                    update_stats_record(total_stats, highest_reached if highest_reached in ['TP1', 'TP2'] else 'TP1')
-                    update_stats_record(monthly_stats, highest_reached if highest_reached in ['TP1', 'TP2'] else 'TP1')
-                    tg(f"🎯 <b>[무손실 본전 방어 마감]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
-                else:
-                    update_stats_record(total_stats, 'LOSS')
-                    update_stats_record(monthly_stats, 'LOSS')
-                    tg(f"🛑 <b>[최소 손절 마감]</b> ({pos.get('name')})\n{format_stats_report(total_stats)}")
-                continue
+    if sent_count:
+        send_telegram(performance_message(state))
 
-            # 보유 종목 뉴스 포착
-            latest_news = get_stock_news(code)
-            saved_news = pos.get("last_news", "")
-            if latest_news and latest_news != saved_news:
-                pos["last_news"] = latest_news
-                pct_chg = ((current_price - entry) / entry) * 100
-                naver_chart_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
-                tv_chart_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
-                
-                tg(f"""🔔 <b>[보유 종목 실시간 이슈 포착]</b> 🔥
-━━━━━━━━━━━━━━━━━━━━━━━
-🪙 <b>종목명:</b> <b>{pos.get('name')} ({code})</b>
-📌 <b>현재 상태:</b> 보유 중 (진입가 대비 <code>{pct_chg:+.2f}%</code>)
 
-🔥 <b>[새로운 소식 및 뉴스]</b>
-{latest_news}
+def main():
+    current = now()
+    if current.weekday() >= 5:
+        log.info("주말이므로 신규 일봉 스캔을 생략합니다.")
+        return
+    if (current.hour, current.minute) < (SIGNAL_AFTER_HOUR, SIGNAL_AFTER_MINUTE):
+        log.info("확정 일봉 확보 전입니다. %02d:%02d KST 이후 실행하세요.", SIGNAL_AFTER_HOUR, SIGNAL_AFTER_MINUTE)
+        return
 
-📈 <b>[실시간 차트 바로가기]</b>
-• <a href="{naver_chart_url}">📲 네이버 증권 차트 보기</a>
-• <a href="{tv_chart_url}">📊 트레이딩뷰 차트 보기</a>
-━━━━━━━━━━━━━━━━━━━━━━━""")
+    state = load_state()
+    log.info("한국 주식 일봉 시그널 v%s 시작", VERSION)
+    closed_count = monitor_positions(state)
+    if closed_count:
+        send_telegram(performance_message(state))
 
-            updated_positions.append(pos)
-        except Exception as e:
-            print(f"[ERROR] 종목 포지션 처리 예외 ({code}): {e}")
-            updated_positions.append(pos)
+    try:
+        regime = market_regime()
+    except Exception:
+        # Fail closed: unknown market state is not treated as a bullish/neutral regime.
+        log.exception("시장 데이터 확인 실패: 신규 신호를 만들지 않습니다.")
+        return
 
-    active_codes = [p.get("code") for p in updated_positions]
-    
-    # 신규 종목 스캔
-    if not is_bear_market and len(updated_positions) < MAX_SLOTS:
-        try:
-            krx = fdr.StockListing('KRX')
-            candidates = krx.dropna(subset=['Code', 'Name']).head(100)
-            
-            for _, row in candidates.iterrows():
-                if len(updated_positions) >= MAX_SLOTS: break
-                code, name = str(row['Code']), str(row['Name'])
-                if code in active_codes: continue
-                
-                try:
-                    df = fdr.DataReader(code)
-                    if len(df) < 30: continue
-                    close = float(df['Close'].iloc[-1])
-                    if not (3000 <= close <= 1000000): continue
-                    
-                    volume = float(df['Volume'].iloc[-1])
-                    if (close * volume) < 7_000_000_000: continue
+    today = current.strftime("%Y-%m-%d")
+    if state.get("last_market_report_date") != today:
+        send_market_report(regime)
+        state["last_market_report_date"] = today
+        save_state(state)
 
-                    ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
-                    ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-                    vol_ma20 = float(df['Volume'].rolling(20).mean().iloc[-1])
-                    
-                    strategy_type, extra_reason = None, None
-                    
-                    if close > ma20 and ma5 > ma20 and volume > vol_ma20:
-                        strategy_type = "주도주 눌림목"
-                        if volume > vol_ma20 * 2.0:
-                            extra_reason = "• 수급/모멘텀: 평균 거래량 대비 2배 이상의 강한 거래대금 유입"
-                    elif close > float(df['Open'].iloc[-1]) and close >= float(df['High'].iloc[-1]) * 0.98 and volume > vol_ma20 * 1.5:
-                        strategy_type = "종가 베팅"
-                        extra_reason = "• 수급/모멘텀: 당일 고가 부근 마감 강세 및 기관/외인 선호 패턴"
-                    else:
-                        delta = df['Close'].diff()
-                        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                        rsi = 100 - (100 / (1 + (gain / loss)))
-                        current_rsi = float(rsi.iloc[-1])
-                        if current_rsi <= 30 and close > float(df['Low'].iloc[-1]):
-                            strategy_type = "낙폭과대 반등"
-                            extra_reason = f"• 수급/모멘텀: 단기 과매도 구간(RSI {current_rsi:.1f}) 탈출 및 저가 매수세"
+    scan_new_signals(state, regime)
+    save_state(state)
+    log.info("완료: 활성 %d / %d", len(state["positions"]), MAX_POSITIONS)
 
-                    if not strategy_type: continue
-
-                    atr_series = calculate_atr(df)
-                    atr_val = float(atr_series.iloc[-1]) if not atr_series.empty and not np.isnan(atr_series.iloc[-1]) else close * 0.025
-                    volatility_pct = max(0.015, min(0.03, atr_val / close))
-                    
-                    entry = close
-                    sl = entry * (1 - volatility_pct)
-                    tp1 = entry * (1 + volatility_pct * 1.8)
-                    tp2 = entry * (1 + volatility_pct * 3.2)
-                    tp3 = entry * (1 + volatility_pct * 5.0)
-
-                    reasons = [f"• 기술적 조건: {strategy_type} 패턴 부합 및 5/20일선 추세 유지"]
-                    if extra_reason: reasons.append(extra_reason)
-                    
-                    comp_info = get_company_info(row)
-                    if comp_info: reasons.append(f"• 기업 정보: {comp_info}")
-                    
-                    initial_news = get_stock_news(code)
-                    if initial_news: reasons.append(f"• 최근 관련 뉴스/이슈:\n{initial_news}")
-
-                    reasons_text = "\n".join(reasons)
-
-                    naver_chart_url = f"https://m.stock.naver.com/domestic/stock/{code}/total"
-                    tv_chart_url = f"https://www.tradingview.com/chart/?symbol=KRX:{code}"
-
-                    updated_positions.append({
-                        "code": code, "name": name, "strategy": strategy_type,
-                        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                        "highest_reached": "NONE", "time": ts(),
-                        "last_news": initial_news
-                    })
-                    active_codes.append(code)
-
-                    tg(f"""🎯 <b>[고승률 변동성 종목 포착 리포트]</b> 🚨
-━━━━━━━━━━━━━━━━━━━━━━━
-📌 <b>포트폴리오 슬롯: [ {len(updated_positions)} / {MAX_SLOTS} ]</b>
-⚡ <b>매매 전략: [ {strategy_type} ]</b>
-🪙 <b>종목명:</b> <b>{name} ({code})</b>
-💰 <b>추정 진입가:</b> <code>{m(entry)}</code>
-
-🔥 <b>[상승 이유 및 기업/뉴스 정보]</b>
-{reasons_text}
-
-🛡 <b>손절가 (SL):</b> <code>{m(sl)}</code> (-{volatility_pct*100:.1f}%)
-🎯 1차 목표가 (TP1): <code>{m(tp1)}</code> (+{volatility_pct*1.8*100:.1f}%)
-🎯 2차 목표가 (TP2): <code>{m(tp2)}</code> (+{volatility_pct*3.2*100:.1f}%)
-🎯 3차 목표가 (TP3): <code>{m(tp3)}</code> (+{volatility_pct*5.0*100:.1f}%)
-
-📈 <b>[실시간 차트 바로가기]</b>
-• <a href="{naver_chart_url}">📲 네이버 증권 차트 보기</a>
-• <a href="{tv_chart_url}">📊 트레이딩뷰 차트 보기</a>
-━━━━━━━━━━━━━━━━━━━━━━━""")
-                except Exception as e:
-                    print(f"[WARN] 종목 분석 예외 발생 [{code}]: {e}")
-                    continue
-        except Exception as e:
-            print(f"[ERROR] 스캐너 실행 중 에러: {e}")
-
-    state["positions"] = updated_positions
-    state["total_stats"] = total_stats
-    state["monthly_stats"] = monthly_stats
-    save(STATE, state)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("실행 중 오류")
+        raise
