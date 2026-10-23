@@ -1,4 +1,5 @@
-FinanceDataReader
+
+finance-datareader==0.9.202
 numpy
 pandas
 requests
